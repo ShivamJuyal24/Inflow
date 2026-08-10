@@ -7,7 +7,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "graph": "tsx src/graph/testGraph.ts"
+    "graph": "tsx src/graph/testGraph.ts",
+    "gmail": "tsx src/services/testGmail.ts"
   },
   "keywords": [],
   "author": "",
