@@ -1,26 +1,45 @@
-import { log } from "node:console";
 import { supabase } from "../config/supabase";
-import { listMessages } from "./gmail.service";
+import { getMessage, listMessages } from "./gmail.service";
+import { parseGmailMessage } from "./email.parser";
 
-async function main(){
-    const {data, error} = await supabase
+async function main() {
+  const { data, error } = await supabase
     .from("google_accounts")
     .select("email, refresh_token")
     .limit(1)
     .single();
 
-    if(error){
-        throw new Error(`Failed to get google account: ${error.message}`)
-    }
-    console.log("Google account:", data.email);
+  if (error) {
+    throw new Error(
+      `Failed to get Google account: ${error.message}`
+    );
+  }
 
-    const messages = await listMessages(data.refresh_token, 5);
+  console.log("Google account:", data.email);
 
-    console.log("messages found:", messages.length);
-    console.log(messages);
+  const messages = await listMessages(
+    data.refresh_token,
+    5
+  );
+
+  console.log("Messages found:", messages.length);
+
+  if (messages.length === 0) {
+    console.log("No messages found.");
+    return;
+  }
+
+  const message = await getMessage(
+    data.refresh_token,
+    messages[0].id!
+  );
+
+  const email = parseGmailMessage(message);
+
+  console.dir(email, { depth: null });
 }
 
-main().catch((error)=>{
-    console.error("Gmail test failed:");
-    console.error(error);
-})
+main().catch((error) => {
+  console.error("Gmail test failed:");
+  console.error(error);
+});

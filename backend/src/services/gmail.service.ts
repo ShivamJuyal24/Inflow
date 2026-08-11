@@ -30,3 +30,17 @@ export async function listMessages(
 
     return (await response).data.messages ?? [];
 }
+
+export async function getMessage(
+    refreshToken:string,
+    messageId: string
+){
+    const gmail = createGmailClient(refreshToken)
+
+    const response = (await gmail).users.messages.get({
+        userId: "me",
+        id:messageId
+    });
+
+    return (await response).data
+}
