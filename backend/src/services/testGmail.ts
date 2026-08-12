@@ -1,45 +1,24 @@
-import { supabase } from "../config/supabase";
-import { getMessage, listMessages } from "./gmail.service";
-import { parseGmailMessage } from "./email.parser";
+import { graph } from "../graph/graph";
 
 async function main() {
-  const { data, error } = await supabase
-    .from("google_accounts")
-    .select("email, refresh_token")
-    .limit(1)
-    .single();
+  console.log("🚀 Starting email triage agent...\n");
 
-  if (error) {
-    throw new Error(
-      `Failed to get Google account: ${error.message}`
-    );
-  }
+  const result = await graph.invoke({
+    emails: [],
+    category: null,
+    draft: null,
+    calendarSlots: [],
+    approvalStatus: null,
+  });
 
-  console.log("Google account:", data.email);
+  console.log("\n🎯 Final state:");
 
-  const messages = await listMessages(
-    data.refresh_token,
-    5
-  );
-
-  console.log("Messages found:", messages.length);
-
-  if (messages.length === 0) {
-    console.log("No messages found.");
-    return;
-  }
-
-  const message = await getMessage(
-    data.refresh_token,
-    messages[0].id!
-  );
-
-  const email = parseGmailMessage(message);
-
-  console.dir(email, { depth: null });
+  console.dir(result, {
+    depth: 2,
+  });
 }
 
 main().catch((error) => {
-  console.error("Gmail test failed:");
+  console.error("Graph failed:");
   console.error(error);
 });

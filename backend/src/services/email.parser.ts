@@ -1,14 +1,5 @@
 import type { gmail_v1 } from "googleapis";
-
-export type ParsedEmail = {
-  id: string;
-  threadId: string;
-  from: string;
-  to: string;
-  subject: string;
-  body: string;
-  receivedAt: string;
-};
+import type { Email } from "../types/email";
 
 function getHeader(
   headers: gmail_v1.Schema$MessagePartHeader[] | undefined,
@@ -52,7 +43,7 @@ function extractBody(
 
 export function parseGmailMessage(
   message: gmail_v1.Schema$Message
-): ParsedEmail {
+): Email {
   const headers = message.payload?.headers;
 
   return {

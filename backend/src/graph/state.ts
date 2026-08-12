@@ -1,11 +1,31 @@
 import { Annotation } from "@langchain/langgraph";
+import type { Email } from "../types/email";
 
 export const StateAnnotation = Annotation.Root({
-    email: Annotation<string | null>,
-    category: Annotation<string | null>,
-    draft: Annotation<string | null>,
-    calendarSlots: Annotation<string[]>,
-    approvalStatus: Annotation<string | null>,
+  emails: Annotation<Email[]>({
+    reducer: (_, next) => next,
+    default: () => [],
+  }),
+
+  category: Annotation<string | null>({
+    reducer: (_, next) => next,
+    default: () => null,
+  }),
+
+  draft: Annotation<string | null>({
+    reducer: (_, next) => next,
+    default: () => null,
+  }),
+
+  calendarSlots: Annotation<string[]>({
+    reducer: (_, next) => next,
+    default: () => [],
+  }),
+
+  approvalStatus: Annotation<string | null>({
+    reducer: (_, next) => next,
+    default: () => null,
+  }),
 });
 
 export type EmailTriageState = typeof StateAnnotation.State;
