@@ -1,7 +1,7 @@
 import { EmailTriageState } from "./state";
 import { getMessage, listMessages } from "../services/gmail.service";
 import { parseGmailMessage } from "../services/email.parser";
-
+import type { Email } from "../types/email";
 import { supabase } from "../config/supabase";
 export async function fetchNode(
     state: EmailTriageState
@@ -27,7 +27,7 @@ export async function fetchNode(
           console.log(" Messages found:", messages.length);
 
           // Fetch and parse every message
-          const emails = [];
+          const emails: Email[] = [];
 
           for(const message of messages){
             if(!message.id){
@@ -47,6 +47,74 @@ export async function fetchNode(
             emails,
           }
           
+}
+
+export async function persistNode(
+  state: EmailTriageState
+): Promise<Partial<EmailTriageState>> {
+  console.log("Persist node running");
+
+  if (state.emails.length === 0) {
+    console.log("No emails to persist");
+    return {};
+  }
+
+  const messageIds = state.emails.map((email) => email.id);
+
+  // Find emails that already exist
+  const { data: existingEmails, error: existingError } = await supabase
+    .from("emails")
+    .select("message_id")
+    .in("message_id", messageIds);
+
+  if (existingError) {
+    throw new Error(
+      `Failed to check existing emails: ${existingError.message}`
+    );
+  }
+
+  const existingMessageIds = new Set(
+    existingEmails?.map((email) => email.message_id) ?? []
+  );
+
+  // Keep only emails that are not already stored
+  const newEmails = state.emails.filter(
+    (email) => !existingMessageIds.has(email.id)
+  );
+
+  console.log(`Found ${existingEmails?.length ?? 0} existing emails`);
+  console.log(`New emails to persist: ${newEmails.length}`);
+
+  if (newEmails.length === 0) {
+    console.log("No new emails to persist");
+    return {};
+  }
+
+  const rows = newEmails.map((email) => ({
+    message_id: email.id,
+    thread_id: email.threadId,
+    account_email: email.to,
+    from_email: email.from,
+    to_email: email.to,
+    subject: email.subject,
+    body: email.body,
+    received_at: email.receivedAt,
+  }));
+
+  const { data, error } = await supabase
+    .from("emails")
+    .insert(rows)
+    .select();
+
+  if (error) {
+    throw new Error(
+      `Failed to persist emails: ${error.message}`
+    );
+  }
+
+  console.log(`Persisted ${data.length} new emails`);
+
+  return {};
 }
 
 export async function classifyNode(

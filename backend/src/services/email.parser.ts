@@ -55,6 +55,8 @@ export function parseGmailMessage(
     body: message.payload
       ? extractBody(message.payload)
       : "",
-    receivedAt: getHeader(headers, "Date"),
+      receivedAt: new Date(
+        getHeader(headers, "Date").replace(/\s*\([^)]*\)\s*$/, "")
+      ).toISOString(),
   };
 }

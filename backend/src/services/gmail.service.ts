@@ -24,9 +24,10 @@ export async function listMessages(
     const gmail = createGmailClient(refreshToken);
 
     const response = (await gmail).users.messages.list({
-        userId:"me",
+        userId: "me",
         maxResults,
-    });
+        q: "is:unread in:inbox",
+      });
 
     return (await response).data.messages ?? [];
 }
