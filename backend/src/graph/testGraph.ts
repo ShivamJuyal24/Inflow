@@ -2,8 +2,8 @@ import { graph } from "./graph";
 
 async function main(){
     const result = await graph.invoke({
-        email: null,
-        category: null,
+        emails : [],
+        classification: null,
         draft: null,
         calendarSlots: [],
         approvalStatus: null,

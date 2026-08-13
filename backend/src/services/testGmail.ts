@@ -5,7 +5,7 @@ async function main() {
 
   const result = await graph.invoke({
     emails: [],
-    category: null,
+    classification: [],
     draft: null,
     calendarSlots: [],
     approvalStatus: null,

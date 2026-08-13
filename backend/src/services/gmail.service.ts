@@ -26,7 +26,7 @@ export async function listMessages(
     const response = (await gmail).users.messages.list({
         userId: "me",
         maxResults,
-        q: "is:unread in:inbox",
+        q: "in:inbox",
       });
 
     return (await response).data.messages ?? [];
