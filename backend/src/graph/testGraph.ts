@@ -3,7 +3,7 @@ import { graph } from "./graph";
 async function main(){
     const result = await graph.invoke({
         emails : [],
-        classification: null,
+        classification: [],
         draft: null,
         calendarSlots: [],
         approvalStatus: null,
