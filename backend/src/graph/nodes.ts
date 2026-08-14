@@ -474,3 +474,28 @@ export async function routeNode(
 
   return {};
 }
+
+/* =========================================================
+   DRAFT NODE
+   ========================================================= */
+
+   export async function draftNode(
+    state: EmailTriageState
+  ): Promise<Partial<EmailTriageState>> {
+    console.log("Draft node running");
+  
+    return {};
+  }
+  
+  
+  /* =========================================================
+     MEETING NODE
+     ========================================================= */
+  
+  export async function meetingNode(
+    state: EmailTriageState
+  ): Promise<Partial<EmailTriageState>> {
+    console.log("Meeting node running");
+  
+    return {};
+  }
