@@ -2,6 +2,7 @@ import { Annotation } from "@langchain/langgraph";
 import type { Email } from "../types/email";
 import type { EmailClassification } from "../types/classification";
 import type { EmailAction } from "../types/action";
+import type { EmailDraft } from "../types/draft";
 
 export const StateAnnotation = Annotation.Root({
   emails: Annotation<Email[]>({
@@ -19,9 +20,9 @@ export const StateAnnotation = Annotation.Root({
     default: () => [],
   }),
 
-  draft: Annotation<string | null>({
+  drafts: Annotation<EmailDraft[]>({
     reducer: (_, next) => next,
-    default: () => null,
+    default: () => [],
   }),
 
   calendarSlots: Annotation<string[]>({

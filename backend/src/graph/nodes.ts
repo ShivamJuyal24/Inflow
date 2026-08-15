@@ -5,6 +5,7 @@ import { parseGmailMessage } from "../services/email.parser";
 import type { Email } from "../types/email";
 import { supabase } from "../config/supabase";
 import { groq } from "../config/groq";
+import type { EmailDraft } from "../types/draft";
 import {
   LLMEmailClassificationSchema,
   type EmailClassification,
@@ -459,23 +460,6 @@ export async function persistNode(
     };
   }
 
-
-
-
-
-/* =========================================================
-   DRAFT NODE
-   ========================================================= */
-
-   export async function draftNode(
-    state: EmailTriageState
-  ): Promise<Partial<EmailTriageState>> {
-    console.log("Draft node running");
-  
-    return {};
-  }
-  
-  
   /* =========================================================
      MEETING NODE
      ========================================================= */
@@ -576,4 +560,211 @@ export async function actionNode(
     }
   
     return Array.from(destinations);
+  }
+
+
+/* =========================================================
+   DRAFT NODE
+   ========================================================= */
+
+/* =========================================================
+   DRAFT NODE
+   ========================================================= */
+
+   export async function draftNode(
+    state: EmailTriageState
+  ): Promise<Partial<EmailTriageState>> {
+    console.log("Draft node running");
+  
+    const draftActions = state.actions.filter(
+      (action) => action.type === "DRAFT_REPLY"
+    );
+  
+    if (draftActions.length === 0) {
+      console.log("No DRAFT_REPLY actions to process");
+      return {};
+    }
+  
+    const messageIds = [...new Set(draftActions.map((action) => action.messageId))];
+  
+    // 1. Look up Supabase email UUIDs for these Gmail message IDs
+    const { data: emailRows, error: emailError } = await supabase
+      .from("emails")
+      .select("id, message_id")
+      .in("message_id", messageIds);
+  
+    if (emailError) {
+      throw new Error(`Failed to look up email IDs: ${emailError.message}`);
+    }
+  
+    const messageIdToEmailId = new Map(
+      emailRows?.map((row) => [row.message_id, row.id]) ?? []
+    );
+  
+    // 2. Find already-persisted drafts so their actions can be reconciled.
+    const emailIds = Array.from(messageIdToEmailId.values());
+    const { data: existingDrafts, error: existingDraftsError } = await supabase
+      .from("drafts")
+      .select("email_id")
+      .in("email_id", emailIds);
+  
+    if (existingDraftsError) {
+      throw new Error(
+        `Failed to check existing drafts: ${existingDraftsError.message}`
+      );
+    }
+  
+    const existingEmailIds = new Set(
+      existingDrafts?.map((d) => d.email_id) ?? []
+    );
+    const completedMessageIds = new Set(
+      messageIds.filter((messageId) => {
+        const emailId = messageIdToEmailId.get(messageId);
+        return emailId !== undefined && existingEmailIds.has(emailId);
+      })
+    );
+
+    const actionsToProcess = messageIds.filter((messageId) => {
+      const emailId = messageIdToEmailId.get(messageId);
+      return emailId !== undefined && !existingEmailIds.has(emailId);
+    });
+  
+    const drafts: EmailDraft[] = [];
+  
+    for (const messageId of actionsToProcess) {
+      const email = state.emails.find((email) => email.id === messageId);
+  
+      if (!email) {
+        console.warn(
+          `Email ${messageId} not found — skipping draft generation`
+        );
+        continue;
+      }
+  
+      console.log(`Generating draft for: ${email.id} (${email.subject})`);
+  
+      const bodyForLLM =
+        email.body.length > 8000
+          ? email.body.slice(0, 8000) + "\n\n[Email body truncated]"
+          : email.body;
+  
+      const prompt = `
+  You are a professional email assistant. Draft a polite, concise reply to the email below.
+  
+  Guidelines:
+  - Address the sender's main points directly.
+  - Keep it brief and professional.
+  - Do NOT include a subject line.
+  - Use a generic sign-off such as "Best regards" or "Thanks" — do NOT invent a sender name.
+  
+  Original email:
+  From: ${email.from}
+  To: ${email.to}
+  Subject: ${email.subject}
+  
+  Body:
+  ${bodyForLLM}
+  
+  Draft the reply:
+  `;
+  
+      try {
+        const completion = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.3,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a professional email drafting assistant. Write clear, concise, and polite replies.",
+            },
+            { role: "user", content: prompt },
+          ],
+        });
+  
+        const draftBody = completion.choices[0]?.message?.content?.trim();
+  
+        if (!draftBody) {
+          console.warn(`Empty draft returned for ${email.id}`);
+          continue;
+        }
+  
+        drafts.push({
+          messageId: email.id,
+          draftBody,
+          status: "PENDING_REVIEW",
+        });
+  
+        console.log(
+          `Draft generated for ${email.id} (${draftBody.length} chars)`
+        );
+      } catch (error: any) {
+        console.error(
+          `Failed to generate draft for ${email.id}:`,
+          error?.message ?? error
+        );
+  
+        if (error?.status === 429) {
+          console.warn("Rate limit hit — stopping draft generation early.");
+          break;
+        }
+      }
+  
+      if (messageId !== actionsToProcess[actionsToProcess.length - 1]) {
+        await sleep(DELAY_BETWEEN_REQUESTS_MS);
+      }
+    }
+  
+    // 3. The existing unique constraint on drafts.email_id makes this safe
+    // when concurrent graph runs both generate a draft for the same email.
+    if (drafts.length > 0) {
+      const draftRows = drafts.map((draft) => ({
+        email_id: messageIdToEmailId.get(draft.messageId),
+        body: draft.draftBody,
+        status: draft.status,
+      }));
+  
+      const { error: upsertError } = await supabase
+        .from("drafts")
+        .upsert(draftRows, { onConflict: "email_id", ignoreDuplicates: true });
+  
+      if (upsertError) {
+        throw new Error(`Failed to persist drafts: ${upsertError.message}`);
+      }
+  
+      for (const draft of drafts) {
+        completedMessageIds.add(draft.messageId);
+      }
+      console.log(`Persisted ${drafts.length} reply drafts`);
+    }
+  
+    // 4. Reconcile actions for both existing and newly persisted drafts.
+    if (completedMessageIds.size > 0) {
+      const completedIds = Array.from(completedMessageIds);
+      const { error: updateError } = await supabase
+        .from("email_actions")
+        .update({ status: "COMPLETED" })
+        .in("message_id", completedIds)
+        .eq("action_type", "DRAFT_REPLY");
+
+      if (updateError) {
+        throw new Error(`Failed to update action statuses: ${updateError.message}`);
+      }
+
+      console.log(
+        `Updated ${completedIds.length} DRAFT_REPLY actions to COMPLETED`
+      );
+    }
+
+    const updatedActions = state.actions.map((action) => {
+      if (
+        action.type === "DRAFT_REPLY" &&
+        completedMessageIds.has(action.messageId)
+      ) {
+        return { ...action, status: "COMPLETED" as const };
+      }
+      return action;
+    });
+  
+    return { drafts, actions: updatedActions };
   }

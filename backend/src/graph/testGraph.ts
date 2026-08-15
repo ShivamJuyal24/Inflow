@@ -29,7 +29,7 @@ async function main() {
         status: "PENDING",
       },
     ],
-    draft: null,
+    drafts: [],
     calendarSlots: [],
     approvalStatus: null,
   });
@@ -38,16 +38,16 @@ async function main() {
 
   console.log("\nClassifications:");
   console.dir(result.classification, { depth: null });
-  
+
   console.log("\nActions:");
   console.dir(result.actions, { depth: null });
-  
-  console.log("\nDraft:");
-  console.log(result.draft);
-  
+
+  console.log("\nDrafts:");
+  console.dir(result.drafts, { depth: null });
+
   console.log("\nCalendar slots:");
   console.log(result.calendarSlots);
-  
+
   console.log("\nApproval status:");
   console.log(result.approvalStatus);
 }

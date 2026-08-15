@@ -6,7 +6,7 @@ function testRoute(name: string, actions: EmailTriageState["actions"]) {
     emails: [],
     classification: [],
     actions,
-    draft: null,
+    drafts: [],
     calendarSlots: [],
     approvalStatus: null,
   });
