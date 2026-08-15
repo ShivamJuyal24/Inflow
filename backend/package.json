@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "graph": "tsx src/graph/testGraph.ts",
-    "gmail": "tsx src/services/testGmail.ts"
+    "gmail": "tsx src/services/testGmail.ts",
+    "test":""
   },
   "keywords": [],
   "author": "",

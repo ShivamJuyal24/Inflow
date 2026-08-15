@@ -1,3 +1,4 @@
+import { END } from "@langchain/langgraph";
 import { EmailTriageState } from "./state";
 import { getMessage, listMessages } from "../services/gmail.service";
 import { parseGmailMessage } from "../services/email.parser";
@@ -8,7 +9,8 @@ import {
   LLMEmailClassificationSchema,
   type EmailClassification,
 } from "../types/classification";
-
+import type { EmailAction } from "../types/action";
+import { mapClassificationToAction } from "./actionMapper";
 /**
  * Maximum number of characters from an email body
  * that will be sent to the LLM.
@@ -104,7 +106,7 @@ export async function fetchNode(
   // Get 20 recent unread emails from inbox
   const messages = await listMessages(
     data.refresh_token,
-    20
+    10
   );
 
   console.log("Messages found:", messages.length);
@@ -458,22 +460,8 @@ export async function persistNode(
   }
 
 
-/* =========================================================
-   ROUTE NODE
-   ========================================================= */
 
-export async function routeNode(
-  state: EmailTriageState
-): Promise<Partial<EmailTriageState>> {
-  console.log("Route node running");
 
-  console.log(
-    "Category received by router:",
-    state.classification
-  );
-
-  return {};
-}
 
 /* =========================================================
    DRAFT NODE
@@ -498,4 +486,94 @@ export async function routeNode(
     console.log("Meeting node running");
   
     return {};
+  }
+
+export async function actionNode(
+  state: EmailTriageState
+): Promise<Partial<EmailTriageState>> {
+  console.log("Action node running");
+
+  const actions = state.classification.map(mapClassificationToAction);
+
+  if (actions.length === 0) {
+    console.log("No actions to persist");
+    return { actions };
+  }
+
+  const messageIds = [...new Set(actions.map((action) => action.messageId))];
+  const { data: existingActions, error: existingActionsError } = await supabase
+    .from("email_actions")
+    .select("message_id, action_type")
+    .in("message_id", messageIds);
+
+  if (existingActionsError) {
+    throw new Error(
+      `Failed to check existing email actions: ${existingActionsError.message}`
+    );
+  }
+
+  const actionKey = (messageId: string, actionType: string) =>
+    `${messageId}\u0000${actionType}`;
+  const existingActionKeys = new Set(
+    existingActions?.map((action) =>
+      actionKey(action.message_id, action.action_type)
+    ) ?? []
+  );
+  const newActionKeys = new Set<string>();
+  const newActions = actions.filter((action) => {
+    const key = actionKey(action.messageId, action.type);
+
+    if (existingActionKeys.has(key) || newActionKeys.has(key)) {
+      return false;
+    }
+
+    newActionKeys.add(key);
+    return true;
+  });
+
+  if (newActions.length === 0) {
+    console.log("All email actions already exist");
+    return { actions };
+  }
+
+  const rows = newActions.map((action: EmailAction) => ({
+    message_id: action.messageId,
+    action_type: action.type,
+    status: action.status,
+  }));
+
+  const { data, error } = await supabase
+    .from("email_actions")
+    .insert(rows)
+    .select("message_id");
+
+  if (error) {
+    throw new Error(`Failed to persist email actions: ${error.message}`);
+  }
+
+  console.log(`Persisted ${data.length} new email actions`);
+
+  return { actions };
+}
+
+  export function routeActions(
+    state: EmailTriageState
+  ): string | string[] {
+    const destinations = new Set<string>();
+  
+    for (const action of state.actions) {
+      if (action.type === "DRAFT_REPLY") {
+        destinations.add("draftWorkFlow");
+      }
+  
+      if (action.type === "ANALYZE_MEETING") {
+        destinations.add("meetingWorkFlow");
+      }
+    }
+  
+    if (destinations.size === 0) {
+      return END;
+    }
+  
+    return Array.from(destinations);
   }
