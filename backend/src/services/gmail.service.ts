@@ -1,5 +1,4 @@
 import { google } from "googleapis";
-import { oauth2Client } from "../config/google";
 
 export async function createGmailClient(refreshToken: string){
     const oauth2Client = new google.auth.OAuth2(
@@ -44,4 +43,60 @@ export async function getMessage(
     });
 
     return (await response).data
+}
+
+export async function sendReply(
+    refreshToken: string,
+    options: {
+        to: string;
+        from: string;
+        subject: string;
+        body: string;
+        threadId: string;
+        inReplyTo?: string;
+        references?: string;
+    }
+){
+    const gmail = await createGmailClient(refreshToken);
+
+    const subject = /^Re:\s/i.test(options.subject)
+        ? options.subject
+        : `Re: ${options.subject}`;
+
+    const headers = [
+        `To: ${options.to}`,
+        `From: ${options.from}`,
+        `Subject: ${subject}`,
+    ];
+
+    if (options.inReplyTo) {
+        headers.push(`In-Reply-To: ${options.inReplyTo}`);
+    }
+
+    if (options.references) {
+        headers.push(`References: ${options.references}`);
+    }
+
+    const raw = [
+        ...headers,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        "",
+        options.body,
+    ].join("\r\n");
+
+    //Base64URL encode (Gmail requirement)
+    const encodedMessage = Buffer.from(raw)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+    const response = await gmail.users.messages.send({
+        userId:"me",
+        requestBody: {
+            raw: encodedMessage,
+            threadId: options.threadId,
+        }
+    });
+    return response.data;
 }
