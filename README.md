@@ -77,7 +77,7 @@ Supabase
       ↓
 LangGraph
       ↓
-fetch → persist → classify → route
+fetch → persist → classify → action → route
       ↓
 draft / calendar / notification / etc.
       ↓
@@ -114,9 +114,14 @@ classifyNode
 Uses Groq to classify emails
 
 
-routeNode
+actionNode
         ↓
-Decides what workflow should happen next
+Maps classifications to durable actions and persists them
+
+
+routeActions
+        ↓
+Decides which workflow should happen next
 ```
 
 ---
@@ -134,16 +139,21 @@ project/
 │   │   │   └── groq.ts
 │   │   │
 │   │   ├── controllers/
-│   │   │   └── auth.controller.ts
+│   │   │   ├── auth.controller.ts
+│   │   │   └── draft.controller.ts
 │   │   │
 │   │   ├── graph/
 │   │   │   ├── graph.ts
 │   │   │   ├── nodes.ts
 │   │   │   ├── state.ts
-│   │   │   └── testGraph.ts
+│   │   │   ├── actionMapper.ts
+│   │   │   ├── testGraph.ts
+│   │   │   ├── testRouting.ts
+│   │   │   └── testDraft.ts
 │   │   │
 │   │   ├── routes/
-│   │   │   └── auth.routes.ts
+│   │   │   ├── auth.routes.ts
+│   │   │   └── draft.routes.ts
 │   │   │
 │   │   ├── services/
 │   │   │   ├── gmail.service.ts
@@ -152,7 +162,9 @@ project/
 │   │   │
 │   │   ├── types/
 │   │   │   ├── email.ts
-│   │   │   └── classification.ts
+│   │   │   ├── classification.ts
+│   │   │   ├── action.ts
+│   │   │   └── draft.ts
 │   │   │
 │   │   └── server.ts
 │   │
@@ -160,6 +172,14 @@ project/
 │
 └── frontend/
 ```
+
+The newer workflow files keep each responsibility separate:
+
+- `actionMapper.ts` converts classifications into application action types.
+- `action.ts` and `draft.ts` define the shared action and draft contracts.
+- `draft.controller.ts` handles listing, reviewing, approving, rejecting, and sending reply drafts.
+- `draft.routes.ts` exposes the draft API routes used by the frontend.
+- `testRouting.ts` and `testDraft.ts` allow the routing and draft workflow to be checked independently.
 
 ---
 
