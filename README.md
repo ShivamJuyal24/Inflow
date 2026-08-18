@@ -706,7 +706,7 @@ END / draftWorkFlow / meetingWorkFlow
 
 `actionNode` performs the action-mapping and action-persistence stages. `routeActions` conditionally sends `DRAFT_REPLY` actions to `draftWorkFlow` and `ANALYZE_MEETING` actions to `meetingWorkFlow`; batches with both action types can reach both placeholder nodes. `STORE` and `REVIEW` actions currently route to `END`.
 
-The draft and meeting nodes are connected but remain placeholders: they log and return without drafting a reply, analyzing a meeting, accessing Calendar, or taking an external action.
+`draftWorkFlow` generates and persists reply drafts with status `PENDING_REVIEW`. `meetingWorkFlow` remains a placeholder; it does not yet analyze meetings, access Calendar, or take an external action.
 **Current Classification State**
 
 After classification, LangGraph state contains structured results similar to:
@@ -753,12 +753,12 @@ The classification array is currently written into LangGraph state.
 | Durable `email_actions` persistence | ✅ |
 | Action idempotency by `(message_id, action_type)` | ✅ |
 | Conditional action routing | ✅ |
-| Reply generation | ⏳ |
+| Reply generation | ✅ |
 | Meeting analysis and Calendar workflow | ⏳ |
 | WhatsApp notifications | ⏳ |
-| Human approval UI/workflow | ⏳ |
-| Sending emails | ⏳ |
-| Classification persistence to Supabase | ⏳ |
+| Human approval UI/workflow | ✅ |
+| Sending emails | ✅ |
+| Classification persistence to Supabase | ✅ |
 ## Day 6 Result
 
 Day 6 successfully established the core AI classification pipeline:
@@ -852,7 +852,33 @@ After persistence, `routeActions` determines the graph destinations:
 - A batch containing both action types routes to both workflows.
 - If neither type is present, the graph ends.
 
-`STORE` and `REVIEW` have no downstream workflow yet. `draftWorkFlow` and `meetingWorkFlow` are connected placeholders only; no reply drafting, meeting analysis, Calendar action, notification, approval, or external action is implemented.
+`STORE` and `REVIEW` have no downstream workflow yet. `draftWorkFlow` generates reply drafts for human review. `meetingWorkFlow` remains a placeholder; meeting analysis, Calendar actions, and notifications are not implemented.
+
+---
+
+## Day 8 — Reply Draft Review, Approval, and Sending ✅
+
+Day 8 completes the first human-in-the-loop email workflow:
+
+```text
+REQUIRES_REPLY email
+      ↓
+Generate reply draft
+      ↓
+PENDING_REVIEW
+      ↓
+Approve or reject
+      ↓
+APPROVED
+      ↓
+Send reply
+      ↓
+SENT
+```
+
+The frontend lists generated drafts and lets the user view the draft body. A draft in `PENDING_REVIEW` can be approved or rejected. Only an `APPROVED` draft can be sent; the backend rejects any attempt to send a draft in another status.
+
+The send flow replies in the original Gmail thread and marks the persisted draft as `SENT` only after Gmail accepts the message. Gmail send permission is now included in the OAuth scopes.
 
 ---
 ## Design Principles
@@ -943,9 +969,10 @@ This makes it possible to test each major component independently.
 
 The current Google scopes are:
 - `gmail.readonly`
+- `gmail.send`
 - `calendar.readonly`
 
-Write/send permissions will be introduced later, after the approval and safety flow has been implemented.
+Gmail send permission is used only after the user explicitly approves a generated reply draft.
 
 ---
 

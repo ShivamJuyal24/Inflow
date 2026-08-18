@@ -43,7 +43,10 @@ function App() {
     }
   };
 
-  const updateStatus = async (emailId: string, action: "send" | "reject") => {
+  const updateStatus = async (
+    emailId: string,
+    action: "approve" | "send" | "reject"
+  ) => {
     try {
       const res = await fetch(`${API_URL}/${emailId}/${action}`, {
         method: "POST",
@@ -126,16 +129,27 @@ function App() {
               {draft.status === "PENDING_REVIEW" && (
                 <div className="mt-3 flex gap-2">
                   <button
-                    onClick={() => updateStatus(draft.email_id, "send")}
-                    className="px-4 py-1.5 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
+                    onClick={() => updateStatus(draft.email_id, "approve")}
+                    className="px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
                   >
-                    Approve & Send
+                    Approve
                   </button>
                   <button
                     onClick={() => updateStatus(draft.email_id, "reject")}
                     className="px-4 py-1.5 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 transition-colors"
                   >
                     Reject
+                  </button>
+                </div>
+              )}
+
+              {draft.status === "APPROVED" && (
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={() => updateStatus(draft.email_id, "send")}
+                    className="px-4 py-1.5 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
+                  >
+                    Send
                   </button>
                 </div>
               )}

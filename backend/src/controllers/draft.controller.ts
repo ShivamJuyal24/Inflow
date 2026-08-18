@@ -91,6 +91,24 @@ export const approveDraft = async (req: Request, res: Response) => {
   try {
     const { emailId } = req.params;
 
+    // Fetch current status first so we only allow PENDING_REVIEW -> APPROVED
+    const { data: existing, error: fetchError } = await supabase
+      .from("drafts")
+      .select("status")
+      .eq("email_id", emailId)
+      .single();
+
+    if (fetchError || !existing) {
+      console.error("Supabase error fetching draft:", fetchError);
+      return res.status(404).json({ message: "Draft not found" });
+    }
+
+    if (existing.status !== "PENDING_REVIEW") {
+      return res.status(400).json({
+        message: `Cannot approve draft with status ${existing.status}. Only PENDING_REVIEW drafts can be approved.`,
+      });
+    }
+
     const { data, error } = await supabase
       .from("drafts")
       .update({ status: "APPROVED", updated_at: new Date().toISOString() })
@@ -100,9 +118,6 @@ export const approveDraft = async (req: Request, res: Response) => {
 
     if (error) {
       console.error("Supabase error approving draft:", error);
-      if (error.code === "PGRST116") {
-        return res.status(404).json({ message: "Draft not found" });
-      }
       return res.status(500).json({ message: "Failed to approve draft" });
     }
 
@@ -117,6 +132,24 @@ export const rejectDraft = async (req: Request, res: Response) => {
   try {
     const { emailId } = req.params;
 
+    // Fetch current status first so we only allow PENDING_REVIEW -> REJECTED
+    const { data: existing, error: fetchError } = await supabase
+      .from("drafts")
+      .select("status")
+      .eq("email_id", emailId)
+      .single();
+
+    if (fetchError || !existing) {
+      console.error("Supabase error fetching draft:", fetchError);
+      return res.status(404).json({ message: "Draft not found" });
+    }
+
+    if (existing.status !== "PENDING_REVIEW") {
+      return res.status(400).json({
+        message: `Cannot reject draft with status ${existing.status}. Only PENDING_REVIEW drafts can be rejected.`,
+      });
+    }
+
     const { data, error } = await supabase
       .from("drafts")
       .update({ status: "REJECTED", updated_at: new Date().toISOString() })
@@ -126,9 +159,6 @@ export const rejectDraft = async (req: Request, res: Response) => {
 
     if (error) {
       console.error("Supabase error rejecting draft:", error);
-      if (error.code === "PGRST116") {
-        return res.status(404).json({ message: "Draft not found" });
-      }
       return res.status(500).json({ message: "Failed to reject draft" });
     }
 
@@ -157,6 +187,13 @@ export const sendDraft = async (req: Request, res: Response) => {
 
     if (draft.status === "SENT") {
       return res.status(400).json({ message: "Draft already sent" });
+    }
+
+    // Approval gate: sending is only allowed once a draft has been explicitly approved.
+    if (draft.status !== "APPROVED") {
+      return res.status(400).json({
+        message: `Cannot send draft with status ${draft.status}. Draft must be APPROVED first.`,
+      });
     }
 
     // 2. Fetch the original email (need thread_id and sender info)

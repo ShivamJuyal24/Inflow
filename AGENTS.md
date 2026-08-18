@@ -4,9 +4,9 @@ Persistent context for coding sessions. This document is based only on the curre
 
 ## Project state
 
-Inflow (`slashy`) is a single-user, read-only Gmail triage backend. Google OAuth provides a stored refresh token; the LangGraph pipeline fetches inbox emails, persists them in Supabase, classifies them with Groq, derives actions, persists new action records, conditionally routes selected actions, and generates reply drafts for `DRAFT_REPLY` actions.
+Inflow (`slashy`) is a single-user Gmail triage application. Google OAuth provides a stored refresh token; the LangGraph pipeline fetches inbox emails, persists them in Supabase, classifies them with Groq, derives actions, persists new action records, conditionally routes selected actions, and generates reply drafts for `DRAFT_REPLY` actions.
 
-The Express server provides health and OAuth routes only. The graph runs from backend CLI scripts; there is no graph HTTP endpoint. `frontend/` remains an unintegrated Vite starter.
+The Express server provides health, OAuth, and draft-review/send routes. The graph runs from backend CLI scripts; there is no graph HTTP endpoint. `frontend/` provides a draft approval screen backed by the draft API.
 
 ## Stack
 
@@ -20,7 +20,7 @@ The Express server provides health and OAuth routes only. The graph runs from ba
 | LLM | Groq SDK, `llama-3.3-70b-versatile` |
 | Validation | Zod 4 |
 
-Google OAuth requests `openid`, `email`, `profile`, `gmail.readonly`, and `calendar.readonly`. There is no Gmail write scope and no Calendar implementation.
+Google OAuth requests `openid`, `email`, `profile`, `gmail.readonly`, `gmail.send`, and `calendar.readonly`. Gmail sending is limited to explicitly approved reply drafts; there is no Calendar implementation.
 
 ## Repository layout
 
@@ -172,7 +172,7 @@ Table details are inferred from repository queries:
 | Table | Fields used / purpose |
 |---|---|
 | `google_accounts` | `email`, `refresh_token`, `created_at`, `updated_at`; stores OAuth accounts. |
-| `emails` | `id` (UUID PK), `message_id`, `thread_id`, `account_email`, `from_email`, `to_email`, `subject`, `body`, `received_at`; stores fetched messages. |
+| `emails` | `id` (UUID PK), `message_id`, `thread_id`, `account_email`, `from_email`, `to_email`, `subject`, `body`, `received_at`, `category`, `classification_reason`, `suggested_action`, `classified_at`; stores fetched messages and persisted classifications. |
 | `email_actions` | `message_id`, `action_type`, `status`; stores durable derived actions. |
 | `drafts` | `email_id` (FK to `emails.id`, unique), `body`, `status`; stores generated reply drafts. |
 
@@ -186,6 +186,11 @@ Implemented endpoints:
 - `GET /api/auth/google`
 - `GET /api/auth/google/callback`
 - `GET /api/auth/google/test-refresh` — uses a hard-coded development email (`shivamjuyal.dev@gmail.com`).
+- `GET /api/drafts`
+- `GET /api/drafts/:emailId`
+- `POST /api/drafts/:emailId/approve`
+- `POST /api/drafts/:emailId/reject`
+- `POST /api/drafts/:emailId/send`
 
 `backend/.env` requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `GROQ_API_KEY`; `PORT` is optional and defaults to 5000. There is no committed `.env.example`.
 
@@ -224,21 +229,19 @@ Root `package.json` has no dev orchestration scripts. Frontend `npm run dev` may
 - Validate LLM-owned fields with Zod and keep application-owned IDs outside LLM control.
 - Preserve persist-before-classify sequencing and action idempotency by `(message_id, action_type)`.
 - Preserve draft idempotency by `drafts.email_id` and existing-draft skip logic in `draftNode`.
-- Preserve read-only Gmail behavior unless a task explicitly introduces new scopes and a safe execution design.
+- Preserve the approval gate: only `APPROVED` drafts may be sent through Gmail.
 - Keep route/controller import extensions consistent with existing NodeNext `.js` imports.
 - Do not modify `.env` or commit secrets.
 
 ## Current limitations
 
-- `draftWorkFlow` generates and persists reply drafts but does not send email, expose an approval UI, or transition draft status beyond `PENDING_REVIEW`.
+- The draft workflow supports `PENDING_REVIEW → APPROVED → SENT` and `PENDING_REVIEW → REJECTED`. The frontend exposes review, approval, rejection, and sending; the backend rejects sends unless the draft is `APPROVED`.
 - `meetingWorkFlow` does not analyze meetings, read Calendar, find slots, or create Calendar events.
-- No notification, WhatsApp, approval workflow, or external-action execution exists.
-- No Gmail sending or other Gmail write operation exists.
+- No notification, WhatsApp, or Calendar workflow exists.
 - `STORE` and `REVIEW` do not have downstream handling.
-- Classifications are held in graph state only; there is no classification table persistence.
-- Every graph run re-classifies all fetched emails; there is no skip logic for already-processed messages.
+- Classifications are persisted on `emails` and already-classified emails are skipped on later graph runs.
 - `draftNode` requires the email body in `state.emails`; it does not re-fetch from Supabase if missing from state.
 - Duplicate body-cleaning logic exists in `nodes.ts` and `email.parser.ts`.
-- The frontend has no application integration, and the graph has no HTTP endpoint.
+- The frontend is currently limited to the draft approval screen, and the graph has no HTTP endpoint.
 - OAuth lacks CSRF `state` parameter; CORS is fully open; refresh tokens are not encrypted at rest.
 - No committed database migration files; schema exists only in Supabase.
