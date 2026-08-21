@@ -1,4 +1,4 @@
-# Inflow — Email Triage Agent
+# Inflow — Email Triage Agent [In- Progress]
 
 An AI-powered email assistant that connects to Gmail and Calendar to triage emails, identify what matters, draft replies, detect meetings, and eventually take approved actions on the user's behalf.
 
