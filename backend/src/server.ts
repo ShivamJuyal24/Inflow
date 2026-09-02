@@ -5,7 +5,7 @@ import authRoutes from "./routes/auth.routes";
 import draftRoutes from "./routes/draft.routes";
 import emailRoutes from "./routes/email.routes";
 import { syncRecentEmails } from "./services/emailSync.service";
-
+import triageRoutes from "./routes/triage.routes";
 dotenv.config();
 
 const app = express();
@@ -23,6 +23,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/drafts", draftRoutes);
 app.use("/api/emails", emailRoutes);
+app.use("/api/triage", triageRoutes);
 
 const PORT = process.env.PORT || 5000;
 
