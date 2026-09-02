@@ -1,164 +1,223 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState, useCallback } from "react";
+import type { Draft, Email } from "./types/draft";
+import { listDrafts, fetchDraft, approveDraft, rejectDraft, sendDraft } from "./lib/draftApi";
+import DraftCard from "./components/DraftCard";
+import DraftDetail from "./components/DraftDetail";
 
-type Email = {
-  id: string;
-  message_id: string;
-  from_email: string;
-  subject: string;
-  received_at: string;
-};
-
-type Draft = {
-  id: string;
-  email_id: string;
-  body: string;
-  status: string;
-  created_at: string;
-  email: Email | null;
-};
-
-const API_URL = "http://localhost:5000/api/drafts";
-
-function App() {
+export default function App() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [selectedEmailId, setSelectedEmailId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{ draft: Draft; email: Email } | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const [loadingDraftId, setLoadingDraftId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [showMobileDetail, setShowMobileDetail] = useState(false);
 
-  useEffect(() => {
-    fetchDrafts();
-  }, []);
-
-  const fetchDrafts = async () => {
+  const loadDrafts = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch(API_URL);
-      if (!res.ok) throw new Error("Failed to fetch drafts");
-      const data = await res.json();
-      setDrafts(data.drafts ?? []);
+      setError(null);
+      const data = await listDrafts();
+      setDrafts(data.drafts);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "Failed to load drafts");
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    loadDrafts();
+  }, [loadDrafts]);
+
+  useEffect(() => {
+    if (!selectedEmailId) {
+      setDetail(null);
+      setDetailLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDetail(null);
+    setDetailLoading(true);
+    fetchDraft(selectedEmailId)
+      .then((data) => {
+        if (!cancelled) {
+          setDetail({ draft: data.draft, email: data.draft.email });
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load draft detail");
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEmailId]);
+
+  const showMessage = useCallback((msg: string) => {
+    setMessage(msg);
+    setTimeout(() => setMessage(null), 3000);
+  }, []);
+
+  const handleSelect = (emailId: string) => {
+    setSelectedEmailId(emailId);
+    setShowMobileDetail(true);
   };
 
-  const updateStatus = async (
-    emailId: string,
-    action: "approve" | "send" | "reject"
-  ) => {
+  const handleApprove = async (emailId: string) => {
     try {
-      const res = await fetch(`${API_URL}/${emailId}/${action}`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.message ?? "Failed to update status");
+      setLoadingAction("approve");
+      setLoadingDraftId(emailId);
+      setError(null);
+      const updated = await approveDraft(emailId);
+      setDrafts((prev) => prev.map((d) => (d.email_id === emailId ? updated : d)));
+      if (detail?.draft.email_id === emailId) {
+        setDetail((prev) => (prev ? { ...prev, draft: updated } : prev));
       }
-      await fetchDrafts();
+      showMessage("Reply approved.");
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to update");
+      setError(err instanceof Error ? err.message : "Approval failed");
+    } finally {
+      setLoadingAction(null);
+      setLoadingDraftId(null);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-500">Loading drafts…</p>
-      </div>
-    );
-  }
+  const handleReject = async (emailId: string) => {
+    try {
+      setLoadingAction("reject");
+      setLoadingDraftId(emailId);
+      setError(null);
+      const updated = await rejectDraft(emailId);
+      setDrafts((prev) => prev.map((d) => (d.email_id === emailId ? updated : d)));
+      if (detail?.draft.email_id === emailId) {
+        setDetail((prev) => (prev ? { ...prev, draft: updated } : prev));
+      }
+      showMessage("Reply rejected.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rejection failed");
+    } finally {
+      setLoadingAction(null);
+      setLoadingDraftId(null);
+    }
+  };
 
-  if (error) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-red-600">{error}</p>
-      </div>
-    );
-  }
+  const handleSend = async (emailId: string) => {
+    try {
+      setLoadingAction("send");
+      setLoadingDraftId(emailId);
+      setError(null);
+      const updated = await sendDraft(emailId);
+      setDrafts((prev) => prev.map((d) => (d.email_id === emailId ? updated : d)));
+      if (detail?.draft.email_id === emailId) {
+        setDetail((prev) => (prev ? { ...prev, draft: updated } : prev));
+      }
+      showMessage("Email sent.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Send failed");
+    } finally {
+      setLoadingAction(null);
+      setLoadingDraftId(null);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Draft Approvals</h1>
+    <div className="flex h-screen flex-col bg-gray-100">
+      {/* Top bar */}
+      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-6 py-4">
+        <h1 className="text-xl font-bold text-gray-900">Email Triage</h1>
+        <button
+          onClick={loadDrafts}
+          disabled={loading}
+          className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
 
-      {drafts.length === 0 ? (
-        <p className="text-gray-500">No drafts pending review.</p>
-      ) : (
-        <div className="space-y-4 max-w-3xl">
-          {drafts.map((draft) => (
-            <div key={draft.id} className="bg-white rounded-lg shadow-sm border p-4">
-              <div className="flex items-center justify-between">
-                <div className="min-w-0">
-                  <p className="font-semibold text-gray-900 truncate">
-                    {draft.email?.subject ?? "No subject"}
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    From: {draft.email?.from_email ?? "Unknown"}
-                  </p>
-                </div>
-                <span
-                  className={`shrink-0 ml-4 px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                    draft.status === "PENDING_REVIEW"
-                      ? "bg-yellow-100 text-yellow-800"
-                      : draft.status === "SENT"
-                      ? "bg-green-100 text-green-800"
-                      : draft.status === "APPROVED"
-                      ? "bg-blue-100 text-blue-800"
-                      : "bg-red-100 text-red-800"
-                  }`}
-                >
-                  {draft.status}
-                </span>
-              </div>
-
-              <button
-                onClick={() =>
-                  setExpandedId(expandedId === draft.email_id ? null : draft.email_id)
-                }
-                className="mt-3 text-sm text-blue-600 hover:text-blue-800 font-medium"
-              >
-                {expandedId === draft.email_id ? "Hide draft" : "Show draft"}
-              </button>
-
-              {expandedId === draft.email_id && (
-                <div className="mt-3 p-3 bg-gray-50 rounded-md text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                  {draft.body}
-                </div>
-              )}
-
-              {draft.status === "PENDING_REVIEW" && (
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => updateStatus(draft.email_id, "approve")}
-                    className="px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    onClick={() => updateStatus(draft.email_id, "reject")}
-                    className="px-4 py-1.5 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 transition-colors"
-                  >
-                    Reject
-                  </button>
-                </div>
-              )}
-
-              {draft.status === "APPROVED" && (
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => updateStatus(draft.email_id, "send")}
-                    className="px-4 py-1.5 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
-                  >
-                    Send
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
+      {/* Notifications */}
+      {error && (
+        <div className="mx-6 mt-4 rounded-md bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {error}
         </div>
       )}
+      {message && (
+        <div className="mx-6 mt-4 rounded-md bg-green-50 px-4 py-3 text-sm font-medium text-green-700">
+          {message}
+        </div>
+      )}
+
+      {/* Main content */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Draft list */}
+        <aside
+          className={[
+            "w-full overflow-y-auto border-r border-gray-200 bg-white p-4 md:block md:w-96",
+            showMobileDetail ? "hidden" : "block",
+          ].join(" ")}
+        >
+          {loading && drafts.length === 0 ? (
+            <p className="text-sm text-gray-500">Loading drafts...</p>
+          ) : drafts.length === 0 ? (
+            <p className="text-sm text-gray-500">No drafts found.</p>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {drafts.map((draft) => (
+                <DraftCard
+                  key={draft.id}
+                  draft={draft}
+                  isSelected={draft.email_id === selectedEmailId}
+                  isActionLoading={loadingDraftId === draft.email_id}
+                  onSelect={handleSelect}
+                  onApprove={handleApprove}
+                  onReject={handleReject}
+                />
+              ))}
+            </div>
+          )}
+        </aside>
+
+        {/* Detail pane */}
+        <main
+          className={[
+            "flex-1 bg-white",
+            showMobileDetail ? "block" : "hidden",
+            "md:block",
+          ].join(" ")}
+        >
+          {showMobileDetail && (
+            <button
+              onClick={() => setShowMobileDetail(false)}
+              className="m-4 flex items-center gap-1 text-sm font-medium text-gray-600 hover:text-gray-900 md:hidden"
+            >
+               Back
+            </button>
+          )}
+          {detailLoading ? (
+            <div className="flex h-full items-center justify-center text-gray-400">
+              <p className="text-sm">Loading...</p>
+            </div>
+          ) : detail ? (
+            <DraftDetail
+              draft={detail.draft}
+              email={detail.email}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onSend={handleSend}
+              loadingAction={loadingAction}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-gray-400">
+              <p className="text-sm">Select a draft to review</p>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
-
-export default App;
