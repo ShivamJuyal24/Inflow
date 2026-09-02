@@ -16,7 +16,7 @@ The goal is to build a scoped, single-user version of an agentic email workflow 
 - **Email:** Gmail API
 - **Calendar:** Google Calendar API
 - **LLM:** Groq
-- **Model:** `llama-3.3-70b-versatile`
+- **Model:** `openai/gpt-oss-120b`
 - **Notifications (planned):** WhatsApp or similar notification channel
 
 ---
@@ -180,6 +180,18 @@ The newer workflow files keep each responsibility separate:
 - `draft.controller.ts` handles listing, reviewing, approving, rejecting, and sending reply drafts.
 - `draft.routes.ts` exposes the draft API routes used by the frontend.
 - `testRouting.ts` and `testDraft.ts` allow the routing and draft workflow to be checked independently.
+
+**Frontend**
+
+The React frontend now provides a responsive draft-review workspace:
+
+- `App.tsx` manages draft loading, selection, refresh, feedback, and draft actions.
+- `components/DraftCard.tsx` renders a draft summary, status, and quick review actions.
+- `components/DraftDetail.tsx` displays the original email and proposed reply in a detail pane.
+- `lib/draftApi.ts` keeps calls to the draft API in one typed client.
+- `types/draft.ts` defines the frontend draft and email contracts.
+
+Vite proxies `/api` requests to the backend during local development. `VITE_API_URL` can override that base path when needed.
 
 ---
 
@@ -554,14 +566,13 @@ The classifier is required to return JSON matching:
 
 ```json
 {
-  "messageId": "gmail-message-id",
   "category": "INFORMATIONAL",
   "reason": "Short explanation of why this category was chosen.",
   "suggested_action": "What the email agent should do next."
 }
 ```
 
-The response is validated using Zod.
+The model returns only the classification fields. The application attaches the Gmail `messageId` after validation, so the model cannot control the email-to-classification mapping.
 
 **Zod Schema**
 
@@ -573,7 +584,7 @@ This prevents invalid categories or malformed AI responses from entering the app
 
 **Groq Integration**
 
-The classifier uses `llama-3.3-70b-versatile` with `temperature: 0`.
+The classifier uses `openai/gpt-oss-120b` with `temperature: 0`.
 
 The Groq request also uses:
 
@@ -779,6 +790,9 @@ The classification array is currently written into LangGraph state.
 | Human approval UI/workflow | ✅ |
 | Sending emails | ✅ |
 | Classification persistence to Supabase | ✅ |
+| Automatic Gmail sync | ✅ |
+| Email listing, detail, and manual sync API | ✅ |
+| Responsive draft review frontend | ✅ |
 ## Day 6 Result
 
 Day 6 successfully established the core AI classification pipeline:
@@ -899,6 +913,58 @@ SENT
 The frontend lists generated drafts and lets the user view the draft body. A draft in `PENDING_REVIEW` can be approved or rejected. Only an `APPROVED` draft can be sent; the backend rejects any attempt to send a draft in another status.
 
 The send flow replies in the original Gmail thread and marks the persisted draft as `SENT` only after Gmail accepts the message. Gmail send permission is now included in the OAuth scopes.
+
+---
+
+## Day 9 — Email Sync API and Draft Review Frontend ✅
+
+This milestone adds the browser-facing pieces needed to review generated replies and keep the local email store current.
+
+### Email sync
+
+The backend now syncs recent Gmail messages automatically when the server starts and at a configurable interval. The default interval is five minutes and can be changed with `SYNC_INTERVAL_MS` in `backend/.env`.
+
+The manual sync endpoint is also available:
+
+```text
+POST /api/emails/sync
+```
+
+The sync service prevents overlapping runs, checks existing Gmail message IDs before retrieving full message bodies, and inserts only new emails into Supabase.
+
+### Email API
+
+The email API provides:
+
+```text
+GET  /api/emails
+GET  /api/emails/:id
+POST /api/emails/sync
+```
+
+The list endpoint supports pagination plus optional `category` and `q` search filters.
+
+### Draft review frontend
+
+The React frontend is now connected to the draft API. It provides:
+
+- A refreshable list of generated drafts with sender, subject, date, status, and reply preview.
+- A desktop two-pane review layout and mobile detail navigation.
+- Full original-email and proposed-reply views.
+- Approval, rejection, and sending controls that follow the backend draft-status rules.
+- Loading, success, and error feedback for API operations.
+
+The frontend uses a small typed API client and a Vite `/api` proxy, keeping the backend URL configurable through `VITE_API_URL` instead of embedding it throughout the UI.
+
+The available draft endpoints are:
+
+```text
+GET  /api/drafts
+GET  /api/drafts/:emailId
+POST /api/drafts/:emailId/approve
+POST /api/drafts/:emailId/reject
+POST /api/drafts/:emailId/send
+```
 
 ---
 ## Design Principles
