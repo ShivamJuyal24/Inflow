@@ -6,7 +6,7 @@ Persistent context for coding sessions. This document is based only on the curre
 
 Inflow (`slashy`) is a single-user Gmail triage application. Google OAuth provides a stored refresh token; the LangGraph pipeline fetches inbox emails, persists them in Supabase, classifies them with Groq, derives actions, persists new action records, conditionally routes selected actions, and generates reply drafts for `DRAFT_REPLY` actions.
 
-The Express server provides health, OAuth, and draft-review/send routes. The graph runs from backend CLI scripts; there is no graph HTTP endpoint. `frontend/` provides a draft approval screen backed by the draft API.
+The Express server provides health, OAuth, inbox, triage, and draft-review/send routes. `services/triage.service.ts` owns full graph invocation and is used by the startup job, scheduled auto-triage, and manual triage endpoints. `frontend/` provides an inbox dashboard with category filters, search, email detail, manual triage, and reply-draft review.
 
 ## Stack
 
@@ -115,6 +115,13 @@ State reducers replace arrays entirely (`(_, next) => next`), not append.
 - Classification is sequential with a one-second delay. Individual failures are logged and skipped; a Groq 429 stops the remainder of the batch and returns partial classifications.
 - The application owns classification `messageId`: the LLM must not provide it, and the node attaches the Gmail ID only after validating model-generated fields.
 
+### Triage execution
+
+- `services/triage.service.ts` owns the reusable `runInboxTriage` operation. It invokes the compiled graph with an empty `EmailTriageState`, builds a `TriageSummary`, and prevents overlapping startup, scheduled, and manual runs with an in-memory guard.
+- `server.ts` runs full triage once at startup and then every `SYNC_INTERVAL_MS` (five minutes by default). The scheduled job no longer calls the ingestion-only `syncRecentEmails` service.
+- `POST /api/triage/run` and the legacy `POST /api/emails/sync` endpoint both invoke the full triage pipeline. A concurrent run receives HTTP 409 from the manual endpoints.
+- The existing `emailSync.service.ts` remains in the repository but is not used by the server scheduler. Do not reintroduce it into the scheduled path without a clear reason; it persists emails only and bypasses classification, action creation, and drafting.
+
 ## Classification and action lifecycle
 
 Classification categories are `SPAM`, `LOW_PRIORITY`, `INFORMATIONAL`, `REQUIRES_REPLY`, `MEETING`, and `IMPORTANT`.
@@ -191,6 +198,10 @@ Implemented endpoints:
 - `POST /api/drafts/:emailId/approve`
 - `POST /api/drafts/:emailId/reject`
 - `POST /api/drafts/:emailId/send`
+- `GET /api/emails` — supports `page`, `limit`, `category`, and `q` filters.
+- `GET /api/emails/:id`
+- `POST /api/emails/sync` — runs the full triage pipeline.
+- `POST /api/triage/run` — runs the full triage pipeline.
 
 `backend/.env` requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `GROQ_API_KEY`; `PORT` is optional and defaults to 5000. There is no committed `.env.example`.
 
@@ -219,7 +230,17 @@ Script behavior:
 
 There is no automated test framework or committed `*.test.*`/`*.spec.*` suite. Running the graph/Gmail/draft scripts requires configured credentials and live Supabase/Groq access, and can write email, action, and draft data to Supabase.
 
-Root `package.json` has no dev orchestration scripts. Frontend `npm run dev` may fail: `main.tsx` imports `./index.css`, which is not present in the repository; `App.tsx` references asset files that are also absent.
+Root `package.json` has no dev orchestration scripts.
+
+From `frontend/`:
+
+```bash
+npm run dev       # Vite development server; /api proxies to Express on port 5000
+npm run build     # TypeScript and production Vite build
+npm run lint      # ESLint
+```
+
+The frontend production build succeeds. The current lint run reports React Fast Refresh export warnings in several component/UI files and `react-hooks/set-state-in-effect` errors in `pages/Dashboard.tsx`.
 
 ## Conventions to preserve
 
@@ -242,6 +263,7 @@ Root `package.json` has no dev orchestration scripts. Frontend `npm run dev` may
 - Classifications are persisted on `emails` and already-classified emails are skipped on later graph runs.
 - `draftNode` requires the email body in `state.emails`; it does not re-fetch from Supabase if missing from state.
 - Duplicate body-cleaning logic exists in `nodes.ts` and `email.parser.ts`.
-- The frontend is currently limited to the draft approval screen, and the graph has no HTTP endpoint.
+- The frontend dashboard lists emails, supports category filters and sender/subject search, shows the stored classification reason and suggested action, and exposes manual triage. It loads a related draft when one exists and retains the approval/send gate. `NEEDS_ATTENTION` is currently filtered client-side after a paginated email response, so qualifying emails on later pages may not appear in that view.
+- The graph is exposed through `POST /api/triage/run`; there is no endpoint for individual graph nodes.
 - OAuth lacks CSRF `state` parameter; CORS is fully open; refresh tokens are not encrypted at rest.
 - No committed database migration files; schema exists only in Supabase.

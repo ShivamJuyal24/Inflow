@@ -1,6 +1,8 @@
+// backend/src/controllers/email.controller.ts
+
 import { Request, Response } from "express";
 import { supabase } from "../config/supabase.js";
-import { syncRecentEmails } from "../services/emailSync.service.js";
+import { runInboxTriage } from "../services/triage.service.js";
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -87,12 +89,23 @@ export const getEmail = async (req: Request, res: Response) => {
 };
 
 // Manual trigger: POST /api/emails/sync
+// Now runs the FULL triage pipeline (same as scheduled + POST /api/triage/run)
 export const syncEmails = async (_req: Request, res: Response) => {
   try {
-    const result = await syncRecentEmails(20);
-    return res.json({ message: "Sync complete", ...result });
-  } catch (error) {
+    const result = await runInboxTriage("manual");
+
+    return res.json({
+      message: "Triage complete",
+      summary: result.summary,
+    });
+  } catch (error: any) {
+    if (error.message === "TRIAGE_ALREADY_RUNNING") {
+      return res.status(409).json({
+        message: "Triage is already in progress",
+      });
+    }
+
     console.error("Sync emails error:", error);
-    return res.status(500).json({ message: "Failed to sync emails" });
+    return res.status(500).json({ message: "Failed to run triage" });
   }
 };

@@ -1,61 +1,34 @@
+// backend/src/controllers/triage.controller.ts
+
 import { Request, Response } from "express";
-import { TriageRunResponse, TriageSummary } from "../types/triage";
-
-import { graph } from '../graph/graph';
-import { EmailTriageState } from "../graph/state";
-
-const INITIAL_STATE: EmailTriageState = {
-    emails:[],
-    classification:[],
-    actions:[],
-    drafts:[],
-    calendarSlots:[],
-    approvalStatus: "PENDING",
-};
+import { runInboxTriage } from "../services/triage.service";
+import { TriageRunResponse } from "../types/triage";
 
 export async function runTriage(req: Request, res: Response): Promise<void> {
-    console.log('[Triage] Run started');
-  
-    try {
-      // 2. Invoke the compiled graph with the empty state
-      const finalState = await graph.invoke(INITIAL_STATE);
-  
-      // 3. Count classifications, actions by type, and newly returned drafts
-      const summary: TriageSummary = {
-        emailsFetched: finalState.emails?.length ?? 0,
-        emailsClassified: finalState.classification?.length ?? 0,
-        actionsCreated: finalState.actions?.length ?? 0,
-      
-        draftsCreated: finalState.drafts?.length ?? 0,
-      
-        draftsPendingReview:
-          finalState.drafts?.filter(
-            (d) => d.status === "PENDING_REVIEW"
-          ).length ?? 0,
-      
-        meetingActions:
-          finalState.actions?.filter(
-            (a) => a.type === "ANALYZE_MEETING"
-          ).length ?? 0,
-      };
-  
-      // 4. Prepare the response
-      const response: TriageRunResponse = {
-        message:"Inbox triage completed",
-        summary: summary,
-      };
+  try {
+    const result = await runInboxTriage("manual");
 
-      // 5. Return 200 with the summary
-      console.log('[Triage] Run completed:', summary);
-      res.status(200).json(response);
-      return;
-  
-    } catch (error) {
-      // 6. Log the error and return a generic 500
-      console.error('[Triage] Run failed:', error);
-      res.status(500).json({
-        message: 'Triage run failed. Please try again later.',
+    const response: TriageRunResponse = {
+      message: "Inbox triage completed",
+      summary: result.summary,
+    };
+
+    res.status(200).json(response);
+    return;
+  } catch (error: any) {
+    // Already running → 409 Conflict
+    if (error.message === "TRIAGE_ALREADY_RUNNING") {
+      res.status(409).json({
+        message: "Triage is already in progress",
       });
       return;
     }
+
+    // Everything else → 500
+    console.error("[Triage] Manual run failed:", error);
+    res.status(500).json({
+      message: "Triage run failed. Please try again later.",
+    });
+    return;
   }
+}

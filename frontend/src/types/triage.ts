@@ -1,20 +1,13 @@
-// backend/src/types/triage.ts
-
-export interface TriageSummary {
+export type TriageSummary = {
     emailsFetched: number;
     emailsClassified: number;
     actionsCreated: number;
     draftsCreated: number;
     draftsPendingReview: number;
     meetingActions: number;
-  }
+  };
   
-  export interface TriageRunResponse {
+  export type TriageRunResponse = {
     message: string;
     summary: TriageSummary;
-  }
-  
-  // Optional: for service-level return
-  export interface TriageRunResult {
-    summary: TriageSummary;
-  }
+  };

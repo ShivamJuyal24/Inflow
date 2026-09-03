@@ -1,11 +1,14 @@
+// backend/src/server.ts
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import authRoutes from "./routes/auth.routes";
 import draftRoutes from "./routes/draft.routes";
 import emailRoutes from "./routes/email.routes";
-import { syncRecentEmails } from "./services/emailSync.service";
 import triageRoutes from "./routes/triage.routes";
+import { runInboxTriage } from "./services/triage.service";
+
 dotenv.config();
 
 const app = express();
@@ -27,24 +30,33 @@ app.use("/api/triage", triageRoutes);
 
 const PORT = process.env.PORT || 5000;
 
-// ── Auto-sync: fetch new Gmail emails on its own ──
+// ── Auto-triage: run full LangGraph pipeline on a schedule ──
 // Default: every 5 minutes. Override with SYNC_INTERVAL_MS in .env
 const SYNC_INTERVAL_MS = Number(process.env.SYNC_INTERVAL_MS) || 5 * 60 * 1000;
 
-async function runAutoSync() {
+async function runAutoTriage() {
   try {
-    await syncRecentEmails(20);
-  } catch (error) {
-    // Never crash the server because of a failed sync
-    console.error("Auto-sync failed:", error);
+    await runInboxTriage("scheduled");
+  } catch (error: any) {
+    // Never crash the server because of a failed triage
+    if (error.message === "TRIAGE_ALREADY_RUNNING") {
+      console.log("Auto-triage skipped: already in progress");
+    } else {
+      console.error("Auto-triage failed:", error);
+    }
   }
 }
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 
-  // Sync once on startup, then on the interval
-  runAutoSync();
-  setInterval(runAutoSync, SYNC_INTERVAL_MS);
-  console.log(`Auto-sync enabled: every ${SYNC_INTERVAL_MS / 1000}s`);
+  // Run full triage once on startup, then on the interval
+  runInboxTriage("startup").catch((err) => {
+    if (err.message !== "TRIAGE_ALREADY_RUNNING") {
+      console.error("Startup triage failed:", err);
+    }
+  });
+
+  setInterval(runAutoTriage, SYNC_INTERVAL_MS);
+  console.log(`Auto-triage enabled: every ${SYNC_INTERVAL_MS / 1000}s`);
 });

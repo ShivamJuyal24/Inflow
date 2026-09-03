@@ -967,6 +967,71 @@ POST /api/drafts/:emailId/send
 ```
 
 ---
+## Day 10 â€” Automatic Full Triage + Inbox Dashboard âœ…
+
+This milestone connects the complete triage workflow to the running application instead of limiting it to CLI runs and the draft-review screen.
+
+### Automatic full triage
+
+The server now runs the complete LangGraph pipeline at startup and on the configured interval:
+
+```text
+Server start / scheduled interval / manual triage
+      â†“
+fetch â†’ persist â†’ classify â†’ action â†’ route
+      â†“
+draft generation when a reply is required
+```
+
+The interval defaults to five minutes and is configured with `SYNC_INTERVAL_MS` in `backend/.env`.
+
+`triage.service.ts` owns this reusable operation. It prevents overlapping runs, returns a summary of fetched emails, classifications, actions, and drafts, and is used by:
+
+- Server startup
+- Scheduled auto-triage
+- `POST /api/triage/run`
+- `POST /api/emails/sync`
+
+The older ingestion-only sync service is no longer used by the server scheduler. This ensures automatically discovered emails are also classified, mapped to actions, and drafted when appropriate.
+
+### Inbox dashboard
+
+The React frontend is now an inbox dashboard rather than a draft-only screen.
+
+It provides:
+
+- An inbox list backed by `GET /api/emails`
+- Category navigation for Inbox, Needs Attention, Important, Reply needed, Meetings, Informational, Low priority, and Spam
+- Sender and subject search
+- Pagination for the email list
+- Full email detail, including category, classification reason, suggested action, and stored body
+- A `Run triage` button backed by `POST /api/triage/run`
+- Existing draft approval, rejection, and send controls when a selected email has a reply draft
+
+The Vite development server proxies `/api` requests to the Express backend on port 5000. The frontend production build completes successfully.
+
+### Current MVP state
+
+The core single-user MVP flow is implemented:
+
+```text
+Gmail inbox
+      â†“
+Automatic or manual full triage
+      â†“
+Inbox dashboard and classification detail
+      â†“
+Generated reply draft
+      â†“
+Human approval
+      â†“
+Reply sent in the original Gmail thread
+```
+
+The next work is validation and release hardening: run the complete flow against a test account, resolve the current frontend lint findings, correct the client-side paginated `Needs Attention` filter, and address the existing OAuth/CORS/token-storage security limitations before deployment.
+
+---
+
 ## Design Principles
 
 **1. Human approval for external actions**
