@@ -1,8 +1,24 @@
 # Inflow — Email Triage Agent [In- Progress]
 
-An AI-powered email assistant that connects to Gmail and Calendar to triage emails, identify what matters, draft replies, detect meetings, and eventually take approved actions on the user's behalf.
+## At a Glance
 
-The goal is to build a scoped, single-user version of an agentic email workflow — starting with reliable Gmail ingestion and gradually adding classification, drafting, calendar actions, notifications, and human approval.
+Inflow is a working AI email-triage agent: it connects to Gmail, classifies every incoming email with an LLM, drafts replies for the ones that need a response, and only sends anything after a human approves it. Built as a scoped, single-user agentic email workflow — Gmail ingestion, classification, drafting, and human-in-the-loop approval, orchestrated with LangGraph.
+
+**Working right now:**
+- Google OAuth + automatic Gmail sync (runs on server start and on an interval)
+- LLM classification into 6 categories (Groq, structured JSON output, Zod-validated)
+- Full triage pipeline: fetch → persist → classify → action → route → draft
+- Inbox dashboard with category views, search, and pagination
+- Reply drafting with human approval before any email is sent
+- Draft review UI (approve / reject / send) wired to the backend
+
+**Still in progress:**
+- Calendar/meeting workflow (detection works, scheduling logic is a stub)
+- WhatsApp/notification channel
+- Production hardening (OAuth/CORS/token-storage security pass)
+
+See the day-by-day build log below for the full technical journey, including the specific bugs hit and fixed along the way (token-limit handling, message-ID integrity, classification prompt tuning, etc.).
+
 
 ---
 
