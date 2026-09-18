@@ -31,9 +31,13 @@ export const listEmails = async (req: Request, res: Response) => {
       .order("received_at", { ascending: false })
       .range(from, to);
 
-    if (category) {
-      query = query.eq("category", category);
-    }
+      if (category === "NEEDS_ATTENTION") {
+        // Composite filter: applied BEFORE pagination (.range below),
+        // so "Needs Attention" sees the full filtered set, not one page.
+        query = query.in("category", ["IMPORTANT", "REQUIRES_REPLY", "MEETING"]);
+      } else if (category) {
+        query = query.eq("category", category);
+      }
 
     if (search) {
       query = query.or(

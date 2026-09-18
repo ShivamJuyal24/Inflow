@@ -9,7 +9,9 @@
     "start": "node dist/server.js",
     "graph": "tsx src/graph/testGraph.ts",
     "gmail": "tsx src/services/testGmail.ts",
-    "draft": "tsx src/graph/testDraft.ts"
+    "draft": "tsx src/graph/testDraft.ts",
+     "test": "vitest run",
+  "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -30,6 +32,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "tsx": "^4.23.11",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
   }
 }

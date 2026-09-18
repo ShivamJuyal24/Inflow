@@ -1,32 +1,12 @@
 // backend/src/server.ts
 
-import express from "express";
-import cors from "cors";
 import dotenv from "dotenv";
-import authRoutes from "./routes/auth.routes";
-import draftRoutes from "./routes/draft.routes";
-import emailRoutes from "./routes/email.routes";
-import triageRoutes from "./routes/triage.routes";
-import { runInboxTriage } from "./services/triage.service";
+import { createApp } from "./app.js";
+import { runInboxTriage } from "./services/triage.service.js";
 
 dotenv.config();
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-app.get("/api/health", (_req, res) => {
-  res.json({
-    success: true,
-    message: "Email Triage Agent API is running",
-  });
-});
-
-app.use("/api/auth", authRoutes);
-app.use("/api/drafts", draftRoutes);
-app.use("/api/emails", emailRoutes);
-app.use("/api/triage", triageRoutes);
+const app = createApp();
 
 const PORT = process.env.PORT || 5000;
 

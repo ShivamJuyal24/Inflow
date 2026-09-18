@@ -121,7 +121,7 @@ export const approveDraft = async (req: Request, res: Response) => {
       return res.status(500).json({ message: "Failed to approve draft" });
     }
 
-    return res.json({ message: "Draft approved", draft: data });
+    return res.status(200).json({ message: "Draft approved", draft: data });
   } catch (error) {
     console.error("Approve draft error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -251,7 +251,7 @@ export const sendDraft = async (req: Request, res: Response) => {
       return res.status(500).json({ message: "Reply sent but failed to update draft status" });
     }
 
-    return res.json({ message: "Reply sent successfully", draft: updatedDraft });
+    return res.status(200).json({ message: "Reply sent successfully", draft: updatedDraft });
   } catch (error) {
     console.error("Send draft error:", error);
     return res.status(500).json({ message: "Failed to send reply" });
