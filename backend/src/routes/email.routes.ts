@@ -1,3 +1,4 @@
+
 import { Router } from "express";
 
 import {
@@ -5,14 +6,16 @@ import {
   getEmail,
   syncEmails,
 } from "../controllers/email.controller.js";
+
 import { requireAuth } from "../middleware/auth.middleware.js";
 
 const router = Router();
 
-router.get("/", listEmails);
+router.get("/", requireAuth, listEmails);
 
-router.get("/:id", getEmail);
+router.get("/:id", requireAuth, getEmail);
 
 router.post("/sync", requireAuth, syncEmails);
 
 export default router;
+

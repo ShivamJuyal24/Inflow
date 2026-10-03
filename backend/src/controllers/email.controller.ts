@@ -5,8 +5,50 @@ import { runInboxTriage } from "../services/triage.service.js";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
+async function getOwnedGoogleAccountId(userId: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("google_accounts")
+    .select("id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Failed to resolve Google account ownership: ${error.message}`
+    );
+  }
+
+  return data?.id ?? null;
+}
+
 export const listEmails = async (req: Request, res: Response) => {
   try {
+    if (!req.user?.id) {
+      return res.status(401).json({
+        message: "Authentication required",
+      });
+    }
+
+    const googleAccountId = await getOwnedGoogleAccountId(req.user.id);
+
+    if (!googleAccountId) {
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const limit = Math.min(
+        MAX_LIMIT,
+        Math.max(1, Number(req.query.limit) || DEFAULT_LIMIT)
+      );
+
+      return res.json({
+        emails: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          totalPages: 0,
+        },
+      });
+    }
+
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(
       MAX_LIMIT,
@@ -25,6 +67,7 @@ export const listEmails = async (req: Request, res: Response) => {
         "id, message_id, thread_id, from_email, to_email, subject, category, classification_reason, suggested_action, received_at",
         { count: "exact" }
       )
+      .eq("google_account_id", googleAccountId)
       .order("received_at", { ascending: false })
       .range(from, to);
 
@@ -68,12 +111,25 @@ export const listEmails = async (req: Request, res: Response) => {
 
 export const getEmail = async (req: Request, res: Response) => {
   try {
+    if (!req.user?.id) {
+      return res.status(401).json({
+        message: "Authentication required",
+      });
+    }
+
+    const googleAccountId = await getOwnedGoogleAccountId(req.user.id);
+
+    if (!googleAccountId) {
+      return res.status(404).json({ message: "Email not found" });
+    }
+
     const { id } = req.params;
 
     const { data: email, error } = await supabase
       .from("emails")
       .select("*")
       .eq("id", id)
+      .eq("google_account_id", googleAccountId)
       .single();
 
     if (error) {
@@ -119,3 +175,4 @@ export const syncEmails = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Failed to run triage" });
   }
 };
+
