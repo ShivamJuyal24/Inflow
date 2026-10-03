@@ -6,15 +6,13 @@ import type { DraftStatus } from "../types/draft.js";
 
 type DraftRequest = Request<{ emailId: string }>;
 
-const DRAFT_COLUMNS = "id, email_id, body, status, created_at, updated_at";
+const DRAFT_COLUMNS =
+  "id, email_id, body, status, created_at, updated_at";
+
+const EMAIL_COLUMNS =
+  "id, google_account_id, thread_id, message_id, from_email, to_email, subject, body, received_at";
 
 const MAX_DRAFT_BODY_LENGTH = 20_000;
-
-/**
- * A draft left in SENDING for longer than this is assumed to belong to a
- * request that died mid-flight (crash, deploy). It can then be reconciled
- * through resolveSend. Younger SENDING drafts are never touched.
- */
 const STALE_SENDING_MS = 5 * 60 * 1000;
 
 const UpdateDraftSchema = z.object({
@@ -33,537 +31,651 @@ function getRfcMessageId(
     ?.value?.trim();
 }
 
-/* =========================================================
-   Atomic status transitions
-   ========================================================= */
+type OwnedEmail = {
+  id: string;
+  google_account_id: string | null;
+  thread_id: string;
+  message_id: string;
+  from_email: string;
+  to_email: string;
+  subject: string;
+  body: string;
+  received_at: string;
+};
 
-/**
- * Moves a draft from one of `from` to `to` in a single conditional UPDATE.
- * The status check and the write happen in the same statement, so when two
- * requests race only one of them matches a row; the other gets `data: null`.
- */
-async function transitionDraft(
-  emailId: string,
-  from: DraftStatus | DraftStatus[],
-  to: DraftStatus,
-  options: { staleBefore?: string } = {}
-) {
-  let query = supabase
-    .from("drafts")
-    .update({ status: to, updated_at: new Date().toISOString() })
-    .eq("email_id", emailId);
-
-  query = Array.isArray(from)
-    ? query.in("status", from)
-    : query.eq("status", from);
-
-  if (options.staleBefore) {
-    query = query.lt("updated_at", options.staleBefore);
+function requireUserId(req: Request, res: Response): string | null {
+  if (!req.user?.id) {
+    res.status(401).json({ message: "Authentication required" });
+    return null;
   }
 
-  return query.select(DRAFT_COLUMNS).maybeSingle();
+  return req.user.id;
 }
 
-/** Current status, used only to explain why a conditional update matched nothing. */
-async function readDraftStatus(
-  emailId: string
-): Promise<{ status: DraftStatus | null; failed: boolean }> {
+async function getOwnedGoogleAccountIds(
+  userId: string
+): Promise<string[]> {
   const { data, error } = await supabase
+    .from("google_accounts")
+    .select("id")
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error(
+      `Failed to resolve owned Google accounts: ${error.message}`
+    );
+  }
+
+  return (data ?? [])
+    .map((account) => account.id)
+    .filter(
+      (id): id is string =>
+        typeof id === "string" && id.length > 0
+    );
+}
+
+async function getOwnedEmail(
+  emailId: string,
+  userId: string
+): Promise<OwnedEmail | null> {
+  const googleAccountIds = await getOwnedGoogleAccountIds(userId);
+
+  if (googleAccountIds.length === 0) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("emails")
+    .select(EMAIL_COLUMNS)
+    .eq("id", emailId)
+    .in("google_account_id", googleAccountIds)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Failed to resolve email ownership: ${error.message}`
+    );
+  }
+
+  return data as OwnedEmail | null;
+}
+
+async function getOwnedDraft(
+  emailId: string,
+  userId: string
+): Promise<{
+  draft: Record<string, any>;
+  email: OwnedEmail;
+} | null> {
+  const email = await getOwnedEmail(emailId, userId);
+
+  if (!email) {
+    return null;
+  }
+
+  const { data: draft, error } = await supabase
     .from("drafts")
-    .select("status")
+    .select(DRAFT_COLUMNS)
     .eq("email_id", emailId)
     .maybeSingle();
 
   if (error) {
-    console.error("Supabase error reading draft status:", error);
-    return { status: null, failed: true };
+    throw new Error(`Failed to resolve draft: ${error.message}`);
   }
 
-  return { status: (data?.status as DraftStatus | undefined) ?? null, failed: false };
+  return draft ? { draft, email } : null;
 }
 
-async function respondTransitionRefused(
-  res: Response,
+async function transitionDraft(
   emailId: string,
-  verb: "approve" | "reject" | "edit",
-  pastTense: string
-) {
-  const { status, failed } = await readDraftStatus(emailId);
+  userId: string,
+  from: DraftStatus,
+  to: DraftStatus,
+  options: {
+    allowStaleSending?: boolean;
+    staleBefore?: string;
+  } = {}
+): Promise<{
+  data: Record<string, any> | null;
+  email: OwnedEmail | null;
+}> {
+  const ownedDraft = await getOwnedDraft(emailId, userId);
 
-  if (failed) {
-    return res.status(500).json({ message: `Failed to ${verb} draft` });
+  if (!ownedDraft) {
+    return {
+      data: null,
+      email: null,
+    };
   }
-  if (!status) {
-    return res.status(404).json({ message: "Draft not found" });
+
+  let query = supabase
+    .from("drafts")
+    .update({
+      status: to,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("email_id", emailId)
+    .eq("status", from);
+
+  if (
+    options.allowStaleSending &&
+    from === "SENDING" &&
+    options.staleBefore
+  ) {
+    query = query.lt("updated_at", options.staleBefore);
   }
-  return res.status(400).json({
-    message: `Cannot ${verb} draft with status ${status}. Only PENDING_REVIEW drafts can be ${pastTense}.`,
+
+  const { data, error } = await query
+    .select(DRAFT_COLUMNS)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to transition draft: ${error.message}`);
+  }
+
+  return {
+    data: data as Record<string, any> | null,
+    email: ownedDraft.email,
+  };
+}
+
+async function readDraftStatus(
+  emailId: string,
+  userId: string
+): Promise<string | null> {
+  const ownedDraft = await getOwnedDraft(emailId, userId);
+
+  if (!ownedDraft) {
+    return null;
+  }
+
+  return ownedDraft.draft.status ?? null;
+}
+
+function respondTransitionRefused(
+  res: Response,
+  status: string | null
+): void {
+  if (status === null) {
+    res.status(404).json({ message: "Draft not found" });
+    return;
+  }
+
+  res.status(409).json({
+    message: `Draft cannot transition from ${status}`,
   });
 }
 
-/* =========================================================
-   Read endpoints
-   ========================================================= */
-
-export const listDrafts = async (_req: Request, res: Response) => {
+export async function listDrafts(
+  req: Request,
+  res: Response
+): Promise<void> {
   try {
-    const { data: drafts, error: draftsError } = await supabase
-      .from("drafts")
-      .select("id, email_id, body, status, created_at, updated_at")
-      .order("created_at", { ascending: false });
+    const userId = requireUserId(req, res);
 
-    if (draftsError) {
-      console.error("Supabase error listing drafts:", draftsError);
-      return res.status(500).json({ message: "Failed to fetch drafts" });
+    if (!userId) {
+      return;
     }
 
-    if (!drafts || drafts.length === 0) {
-      return res.json({ drafts: [] });
+    const googleAccountIds =
+      await getOwnedGoogleAccountIds(userId);
+
+    if (googleAccountIds.length === 0) {
+      res.json({ drafts: [] });
+      return;
     }
 
-    const emailIds = drafts.map((d) => d.email_id);
-    const { data: emails, error: emailsError } = await supabase
+    const { data: emails, error: emailError } = await supabase
       .from("emails")
-      .select("id, message_id, from_email, subject, received_at")
-      .in("id", emailIds);
-
-    if (emailsError) {
-      console.error("Supabase error fetching emails:", emailsError);
-      return res.status(500).json({ message: "Failed to fetch emails" });
-    }
-
-    const emailMap = new Map(emails?.map((e) => [e.id, e]) ?? []);
-
-    const enrichedDrafts = drafts.map((draft) => ({
-      ...draft,
-      email: emailMap.get(draft.email_id) ?? null,
-    }));
-
-    return res.json({ drafts: enrichedDrafts });
-  } catch (error) {
-    console.error("List drafts error:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
-export const getDraft = async (req: Request, res: Response) => {
-  try {
-    const { emailId } = req.params;
-
-    const { data: draft, error: draftError } = await supabase
-      .from("drafts")
-      .select("id, email_id, body, status, created_at, updated_at")
-      .eq("email_id", emailId)
-      .single();
-
-    if (draftError) {
-      console.error("Supabase error fetching draft:", draftError);
-      if (draftError.code === "PGRST116") {
-        return res.status(404).json({ message: "Draft not found" });
-      }
-      return res.status(500).json({ message: "Failed to fetch draft" });
-    }
-
-    const { data: email, error: emailError } = await supabase
-      .from("emails")
-      .select("id, message_id, from_email, to_email, subject, body, received_at")
-      .eq("id", draft.email_id)
-      .single();
+      .select(EMAIL_COLUMNS)
+      .in("google_account_id", googleAccountIds);
 
     if (emailError) {
-      console.error("Supabase error fetching email:", emailError);
-      return res.status(500).json({ message: "Failed to fetch email" });
+      throw new Error(
+        `Failed to load owned emails: ${emailError.message}`
+      );
     }
 
-    return res.json({ draft: { ...draft, email } });
+    const ownedEmails = emails ?? [];
+
+    if (ownedEmails.length === 0) {
+      res.json({ drafts: [] });
+      return;
+    }
+
+    const emailIds = ownedEmails.map((email) => email.id);
+
+    const { data: drafts, error: draftError } = await supabase
+      .from("drafts")
+      .select(DRAFT_COLUMNS)
+      .in("email_id", emailIds);
+
+    if (draftError) {
+      throw new Error(
+        `Failed to load drafts: ${draftError.message}`
+      );
+    }
+
+    const emailById = new Map(
+      ownedEmails.map((email) => [email.id, email])
+    );
+
+    const result = (drafts ?? []).map((draft) => ({
+      ...draft,
+      email: emailById.get(draft.email_id) ?? null,
+    }));
+
+    res.json({ drafts: result });
   } catch (error) {
-    console.error("Get draft error:", error);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Failed to list drafts:", error);
+    res.status(500).json({ message: "Failed to list drafts" });
   }
-};
+}
 
-/* =========================================================
-   Review: edit / approve / reject
-   ========================================================= */
-
-/**
- * Edit the reply text. Only allowed while the draft is PENDING_REVIEW, and
- * enforced in the UPDATE itself so an edit cannot land after approval has
- * started (which would change what gets sent after it was approved).
- */
-export const updateDraft = async (req: DraftRequest, res: Response) => {
+export async function getDraft(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
   try {
+    const userId = requireUserId(req, res);
+
+    if (!userId) {
+      return;
+    }
+
     const { emailId } = req.params;
 
+    const ownedDraft = await getOwnedDraft(emailId, userId);
+
+    if (!ownedDraft) {
+      res.status(404).json({ message: "Draft not found" });
+      return;
+    }
+
+    res.json({
+      ...ownedDraft.draft,
+      email: ownedDraft.email,
+    });
+  } catch (error) {
+    console.error("Failed to get draft:", error);
+    res.status(500).json({ message: "Failed to get draft" });
+  }
+}
+
+export async function updateDraft(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const userId = requireUserId(req, res);
+
+    if (!userId) {
+      return;
+    }
+
+    const { emailId } = req.params;
+
+    const ownedDraft = await getOwnedDraft(emailId, userId);
+
+    if (!ownedDraft) {
+      res.status(404).json({ message: "Draft not found" });
+      return;
+    }
+
     const parsed = UpdateDraftSchema.safeParse(req.body);
+
     if (!parsed.success) {
-      return res.status(400).json({
-        message: `Draft body must be a non-empty string of at most ${MAX_DRAFT_BODY_LENGTH} characters`,
+      res.status(400).json({
+        message: "Invalid request body",
+        errors: parsed.error.flatten(),
       });
+      return;
     }
 
     const { data, error } = await supabase
       .from("drafts")
-      .update({ body: parsed.data.body, updated_at: new Date().toISOString() })
+      .update({
+        body: parsed.data.body,
+        updated_at: new Date().toISOString(),
+      })
       .eq("email_id", emailId)
       .eq("status", "PENDING_REVIEW")
       .select(DRAFT_COLUMNS)
       .maybeSingle();
 
     if (error) {
-      console.error("Supabase error updating draft:", error);
-      return res.status(500).json({ message: "Failed to update draft" });
+      throw new Error(
+        `Failed to update draft: ${error.message}`
+      );
     }
 
     if (!data) {
-      return respondTransitionRefused(res, emailId, "edit", "edited");
+      const status = await readDraftStatus(emailId, userId);
+      respondTransitionRefused(res, status);
+      return;
     }
 
-    return res.status(200).json({ message: "Draft updated", draft: data });
+    res.json(data);
   } catch (error) {
-    console.error("Update draft error:", error);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Failed to update draft:", error);
+    res.status(500).json({ message: "Failed to update draft" });
   }
-};
+}
 
-export const approveDraft = async (req: DraftRequest, res: Response) => {
+export async function approveDraft(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
   try {
+    const userId = requireUserId(req, res);
+
+    if (!userId) {
+      return;
+    }
+
     const { emailId } = req.params;
 
-    const { data, error } = await transitionDraft(
+    const result = await transitionDraft(
       emailId,
+      userId,
       "PENDING_REVIEW",
       "APPROVED"
     );
 
-    if (error) {
-      console.error("Supabase error approving draft:", error);
-      return res.status(500).json({ message: "Failed to approve draft" });
+    if (!result.data) {
+      const status = await readDraftStatus(emailId, userId);
+      respondTransitionRefused(res, status);
+      return;
     }
 
-    if (!data) {
-      return respondTransitionRefused(res, emailId, "approve", "approved");
-    }
-
-    return res.status(200).json({ message: "Draft approved", draft: data });
+    res.json(result.data);
   } catch (error) {
-    console.error("Approve draft error:", error);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Failed to approve draft:", error);
+    res.status(500).json({ message: "Failed to approve draft" });
   }
-};
+}
 
-export const rejectDraft = async (req: DraftRequest, res: Response) => {
+export async function rejectDraft(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
   try {
+    const userId = requireUserId(req, res);
+
+    if (!userId) {
+      return;
+    }
+
     const { emailId } = req.params;
 
-    const { data, error } = await transitionDraft(
+    const result = await transitionDraft(
       emailId,
+      userId,
       "PENDING_REVIEW",
       "REJECTED"
     );
 
-    if (error) {
-      console.error("Supabase error rejecting draft:", error);
-      return res.status(500).json({ message: "Failed to reject draft" });
+    if (!result.data) {
+      const status = await readDraftStatus(emailId, userId);
+      respondTransitionRefused(res, status);
+      return;
     }
 
-    if (!data) {
-      return respondTransitionRefused(res, emailId, "reject", "rejected");
-    }
-
-    return res.json({ message: "Draft rejected", draft: data });
+    res.json(result.data);
   } catch (error) {
-    console.error("Reject draft error:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
-/* =========================================================
-   Send
-   ========================================================= */
-
-class SendSetupError extends Error {
-  constructor(
-    readonly httpStatus: number,
-    message: string
-  ) {
-    super(message);
+    console.error("Failed to reject draft:", error);
+    res.status(500).json({ message: "Failed to reject draft" });
   }
 }
 
-/**
- * True only when Gmail (or the network) definitely refused the request, so
- * the message cannot have been sent and releasing the draft is safe.
- * Anything else (5xx, timeouts, dropped connections, unknown errors) might
- * have been accepted by Gmail before the failure, so it is treated as
- * uncertain and never retried automatically.
- */
-function isDefinitiveSendRejection(error: unknown): boolean {
-  const e = error as any;
+export async function sendDraft(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
+  const userId = requireUserId(req, res);
 
-  const numericCode =
-    typeof e?.code === "number"
-      ? e.code
-      : typeof e?.code === "string" && /^\d{3}$/.test(e.code)
-        ? Number(e.code)
-        : undefined;
-
-  const status = e?.response?.status ?? e?.status ?? numericCode;
-
-  if (typeof status === "number") {
-    return status >= 400 && status < 500 && status !== 408;
+  if (!userId) {
+    return;
   }
 
-  // The connection was never established, so nothing reached Gmail.
-  return ["ENOTFOUND", "ECONNREFUSED", "EAI_AGAIN"].includes(e?.code);
-}
-
-async function respondSendRefused(res: Response, emailId: string) {
-  const { status, failed } = await readDraftStatus(emailId);
-
-  if (failed) {
-    return res.status(500).json({ message: "Failed to send reply" });
-  }
-  if (!status) {
-    return res.status(404).json({ message: "Draft not found" });
-  }
-  if (status === "SENT") {
-    return res.status(400).json({ message: "Draft already sent" });
-  }
-  if (status === "SENDING") {
-    return res.status(409).json({ message: "Draft is already being sent" });
-  }
-  if (status === "SEND_UNCERTAIN") {
-    return res.status(409).json({
-      message:
-        "A previous send attempt could not be confirmed. Check your Sent folder, then mark the draft as sent or not sent.",
-    });
-  }
-
-  // Approval gate: sending is only allowed once a draft has been explicitly approved.
-  return res.status(400).json({
-    message: `Cannot send draft with status ${status}. Draft must be APPROVED first.`,
-  });
-}
-
-/** Put a claimed draft back to APPROVED. Only used when nothing was sent. */
-async function releaseClaim(emailId: string) {
-  try {
-    const { error } = await transitionDraft(emailId, "SENDING", "APPROVED");
-    if (error) {
-      console.error("Failed to release send claim:", error);
-    }
-  } catch (error) {
-    console.error("Failed to release send claim:", error);
-  }
-}
-
-export const sendDraft = async (req: DraftRequest, res: Response) => {
   const { emailId } = req.params;
 
+  let ownedDraft: {
+    draft: Record<string, any>;
+    email: OwnedEmail;
+  } | null = null;
+
   try {
-    // 1. Claim the draft: APPROVED -> SENDING in one conditional UPDATE.
-    // Exactly one concurrent request can win; the rest are refused below.
-    const { data: draft, error: claimError } = await transitionDraft(
+    ownedDraft = await getOwnedDraft(emailId, userId);
+
+    if (!ownedDraft) {
+      res.status(404).json({ message: "Draft not found" });
+      return;
+    }
+
+    if (!ownedDraft.email.google_account_id) {
+      res.status(404).json({ message: "Google account not found" });
+      return;
+    }
+
+    const { data: account, error: accountError } = await supabase
+      .from("google_accounts")
+      .select("id, user_id, email, refresh_token")
+      .eq("id", ownedDraft.email.google_account_id)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (accountError) {
+      throw new Error(
+        `Failed to resolve Google account: ${accountError.message}`
+      );
+    }
+
+    if (!account) {
+      res.status(404).json({ message: "Google account not found" });
+      return;
+    }
+
+    const claimed = await transitionDraft(
       emailId,
+      userId,
       "APPROVED",
       "SENDING"
     );
 
-    if (claimError) {
-      console.error("Supabase error claiming draft:", claimError);
-      return res.status(500).json({ message: "Failed to send reply" });
+    if (!claimed.data) {
+      const status = await readDraftStatus(emailId, userId);
+      respondTransitionRefused(res, status);
+      return;
     }
-
-    if (!draft) {
-      return respondSendRefused(res, emailId);
-    }
-
-    // From here on this request owns the draft. The body to send is the one
-    // returned by the claim itself, i.e. exactly what was approved.
-
-    // 2. Everything needed to send. A failure here means nothing was sent,
-    // so the claim is released and the draft can be retried.
-    let email: {
-      thread_id: string;
-      message_id: string;
-      from_email: string;
-      subject: string;
-    };
-    let account: { email: string; refresh_token: string };
-    let rfcMessageId: string | undefined;
 
     try {
-      const { data: emailRow, error: emailError } = await supabase
-        .from("emails")
-        .select("id, thread_id, message_id, from_email, to_email, subject")
-        .eq("id", draft.email_id)
-        .single();
-
-      if (emailError || !emailRow) {
-        console.error("Supabase error fetching email:", emailError);
-        throw new SendSetupError(404, "Original email not found");
-      }
-      email = emailRow;
-
-      const { data: accountRow, error: accountError } = await supabase
-        .from("google_accounts")
-        .select("email, refresh_token")
-        .limit(1)
-        .single();
-
-      if (accountError || !accountRow) {
-        console.error("Supabase error fetching account:", accountError);
-        throw new SendSetupError(500, "Google account not configured");
-      }
-      account = accountRow;
-
-      // RFC Message-ID of the original, for threading.
-      const originalMessage = await getMessage(
+      const message = await getMessage(
         account.refresh_token,
-        email.message_id
+        ownedDraft.email.message_id
       );
-      rfcMessageId = getRfcMessageId(originalMessage.payload?.headers);
-    } catch (setupError) {
-      await releaseClaim(emailId);
 
-      if (setupError instanceof SendSetupError) {
-        return res
-          .status(setupError.httpStatus)
-          .json({ message: setupError.message });
-      }
-      console.error("Send draft setup error:", setupError);
-      return res.status(500).json({ message: "Failed to send reply" });
-    }
+      const rfcMessageId = getRfcMessageId(
+        message.payload?.headers
+      );
 
-    // 3. Send. Never retried automatically after an uncertain failure.
-    try {
       await sendReply(account.refresh_token, {
-        to: email.from_email,
+        to: ownedDraft.email.from_email,
         from: account.email,
-        subject: email.subject,
-        body: draft.body,
-        threadId: email.thread_id,
+        subject: ownedDraft.email.subject,
+        body: ownedDraft.draft.body,
+        threadId: ownedDraft.email.thread_id,
         inReplyTo: rfcMessageId,
         references: rfcMessageId,
       });
-    } catch (sendError) {
-      if (isDefinitiveSendRejection(sendError)) {
-        console.error("Gmail rejected the reply:", sendError);
-        await releaseClaim(emailId);
-        return res.status(500).json({ message: "Failed to send reply" });
-      }
+    } catch (error: any) {
+      const statusCode = error?.response?.status ?? error?.code;
 
-      console.error("Gmail send outcome uncertain:", sendError);
-      let uncertainDraft = null;
-      try {
-        const { data } = await transitionDraft(
+      if (
+        typeof statusCode === "number" &&
+        statusCode >= 400 &&
+        statusCode < 500
+      ) {
+        await transitionDraft(
           emailId,
+          userId,
           "SENDING",
-          "SEND_UNCERTAIN"
+          "APPROVED"
         );
-        uncertainDraft = data;
-      } catch (markError) {
-        console.error("Failed to mark draft SEND_UNCERTAIN:", markError);
+
+        res.status(502).json({
+          message: "Gmail rejected the send request",
+        });
+        return;
       }
 
-      return res.status(502).json({
+      await transitionDraft(
+        emailId,
+        userId,
+        "SENDING",
+        "SEND_UNCERTAIN"
+      );
+
+      res.status(503).json({
         message:
-          "Gmail did not confirm the send. Check your Sent folder before trying again.",
-        draft: uncertainDraft,
+          "Send outcome is uncertain. Resolve the send status before retrying.",
       });
+      return;
     }
 
-    // 4. Record the outcome. The reply is already out, so a failure here is
-    // reported as such and the draft stays SENDING (never re-sendable).
+    // Gmail has accepted the reply at this point. If finalizing the draft
+    // fails, we must NOT fall through to the outer catch, which would release
+    // the claim (SENDING -> APPROVED) and allow the reply to be sent twice.
+    let sent: Awaited<ReturnType<typeof transitionDraft>>;
+
     try {
-      const { data: sentDraft, error: sentError } = await transitionDraft(
+      sent = await transitionDraft(
         emailId,
+        userId,
         "SENDING",
         "SENT"
       );
+    } catch (finalizeError) {
+      console.error(
+        "Reply sent but failed to finalize draft:",
+        finalizeError
+      );
 
-      if (sentError || !sentDraft) {
-        console.error("Supabase error marking draft SENT:", sentError);
-        return res
-          .status(500)
-          .json({ message: "Reply sent but failed to update draft status" });
-      }
-
-      return res
-        .status(200)
-        .json({ message: "Reply sent successfully", draft: sentDraft });
-    } catch (markError) {
-      console.error("Supabase error marking draft SENT:", markError);
-      return res
-        .status(500)
-        .json({ message: "Reply sent but failed to update draft status" });
+      res.status(500).json({
+        message: "Reply sent but failed to update draft status",
+      });
+      return;
     }
-  } catch (error) {
-    // Only reachable before the claim succeeded (or if the claim query threw),
-    // so nothing has been sent.
-    console.error("Send draft error:", error);
-    return res.status(500).json({ message: "Failed to send reply" });
-  }
-};
 
-/**
- * Human reconciliation after an uncertain send: the user checks their Sent
- * folder and reports what actually happened.
- *   outcome SENT      -> draft becomes SENT
- *   outcome NOT_SENT  -> draft returns to APPROVED so it can be sent again
- * Also accepts a SENDING draft that has been stuck past STALE_SENDING_MS.
- */
-export const resolveSend = async (req: DraftRequest, res: Response) => {
+    if (!sent.data) {
+      res.status(503).json({
+        message:
+          "Reply may have been sent, but draft status could not be finalized.",
+      });
+      return;
+    }
+
+    res.json(sent.data);
+  } catch (error) {
+    console.error("Failed to send draft:", error);
+
+    if (ownedDraft) {
+      try {
+        await transitionDraft(
+          emailId,
+          userId,
+          "SENDING",
+          "APPROVED"
+        );
+      } catch (releaseError) {
+        console.error(
+          "Failed to release sending claim:",
+          releaseError
+        );
+      }
+    }
+
+    res.status(500).json({ message: "Failed to send draft" });
+  }
+}
+
+export async function resolveSend(
+  req: DraftRequest,
+  res: Response
+): Promise<void> {
   try {
-    const { emailId } = req.params;
+    const userId = requireUserId(req, res);
+
+    if (!userId) {
+      return;
+    }
 
     const parsed = ResolveSendSchema.safeParse(req.body);
+
     if (!parsed.success) {
-      return res
-        .status(400)
-        .json({ message: 'outcome must be "SENT" or "NOT_SENT"' });
-    }
-
-    const target: DraftStatus =
-      parsed.data.outcome === "SENT" ? "SENT" : "APPROVED";
-
-    let result = await transitionDraft(emailId, "SEND_UNCERTAIN", target);
-
-    if (!result.error && !result.data) {
-      result = await transitionDraft(emailId, "SENDING", target, {
-        staleBefore: new Date(Date.now() - STALE_SENDING_MS).toISOString(),
+      res.status(400).json({
+        message: "Invalid request body",
+        errors: parsed.error.flatten(),
       });
+      return;
     }
 
-    if (result.error) {
-      console.error("Supabase error resolving send:", result.error);
-      return res.status(500).json({ message: "Failed to resolve send" });
+    const { emailId } = req.params;
+
+    if (parsed.data.outcome === "SENT") {
+      const result = await transitionDraft(
+        emailId,
+        userId,
+        "SEND_UNCERTAIN",
+        "SENT"
+      );
+
+      if (!result.data) {
+        const status = await readDraftStatus(emailId, userId);
+        respondTransitionRefused(res, status);
+        return;
+      }
+
+      res.json(result.data);
+      return;
     }
+
+    const staleBefore = new Date(
+      Date.now() - STALE_SENDING_MS
+    ).toISOString();
+
+    const result = await transitionDraft(
+      emailId,
+      userId,
+      "SEND_UNCERTAIN",
+      "APPROVED"
+    );
 
     if (!result.data) {
-      const { status, failed } = await readDraftStatus(emailId);
+      const staleSending = await transitionDraft(
+        emailId,
+        userId,
+        "SENDING",
+        "APPROVED",
+        {
+          allowStaleSending: true,
+          staleBefore,
+        }
+      );
 
-      if (failed) {
-        return res.status(500).json({ message: "Failed to resolve send" });
+      if (!staleSending.data) {
+        const status = await readDraftStatus(emailId, userId);
+        respondTransitionRefused(res, status);
+        return;
       }
-      if (!status) {
-        return res.status(404).json({ message: "Draft not found" });
-      }
-      return res.status(400).json({
-        message: `Cannot resolve send for draft with status ${status}. Only SEND_UNCERTAIN drafts (or SENDING drafts stuck for over ${STALE_SENDING_MS / 60000} minutes) can be resolved.`,
-      });
+
+      res.json(staleSending.data);
+      return;
     }
 
-    return res.status(200).json({
-      message:
-        parsed.data.outcome === "SENT"
-          ? "Draft marked as sent"
-          : "Draft returned to APPROVED; it can be sent again",
-      draft: result.data,
-    });
+    res.json(result.data);
   } catch (error) {
-    console.error("Resolve send error:", error);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Failed to resolve send:", error);
+    res.status(500).json({ message: "Failed to resolve send" });
   }
-};
+}
