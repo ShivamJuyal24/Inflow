@@ -1,5 +1,3 @@
-// backend/src/controllers/email.controller.ts
-
 import { Request, Response } from "express";
 import { supabase } from "../config/supabase.js";
 import { runInboxTriage } from "../services/triage.service.js";
@@ -18,7 +16,6 @@ export const listEmails = async (req: Request, res: Response) => {
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
-    // Optional filters: ?category=IMPORTANT&q=invoice
     const category = req.query.category as string | undefined;
     const search = req.query.q as string | undefined;
 
@@ -31,13 +28,15 @@ export const listEmails = async (req: Request, res: Response) => {
       .order("received_at", { ascending: false })
       .range(from, to);
 
-      if (category === "NEEDS_ATTENTION") {
-        // Composite filter: applied BEFORE pagination (.range below),
-        // so "Needs Attention" sees the full filtered set, not one page.
-        query = query.in("category", ["IMPORTANT", "REQUIRES_REPLY", "MEETING"]);
-      } else if (category) {
-        query = query.eq("category", category);
-      }
+    if (category === "NEEDS_ATTENTION") {
+      query = query.in("category", [
+        "IMPORTANT",
+        "REQUIRES_REPLY",
+        "MEETING",
+      ]);
+    } else if (category) {
+      query = query.eq("category", category);
+    }
 
     if (search) {
       query = query.or(
@@ -81,6 +80,7 @@ export const getEmail = async (req: Request, res: Response) => {
       if (error.code === "PGRST116") {
         return res.status(404).json({ message: "Email not found" });
       }
+
       console.error("Supabase error fetching email:", error);
       return res.status(500).json({ message: "Failed to fetch email" });
     }
@@ -93,10 +93,16 @@ export const getEmail = async (req: Request, res: Response) => {
 };
 
 // Manual trigger: POST /api/emails/sync
-// Now runs the FULL triage pipeline (same as scheduled + POST /api/triage/run)
-export const syncEmails = async (_req: Request, res: Response) => {
+// Runs the FULL triage pipeline for the authenticated user.
+export const syncEmails = async (req: Request, res: Response) => {
   try {
-    const result = await runInboxTriage("manual");
+    if (!req.user?.id) {
+      return res.status(401).json({
+        message: "Authentication required",
+      });
+    }
+
+    const result = await runInboxTriage("manual", req.user.id);
 
     return res.json({
       message: "Triage complete",

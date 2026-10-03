@@ -26,8 +26,18 @@ vi.mock("../config/gmailSync", () => ({
   getGmailSyncConfig: configMock.getGmailSyncConfig,
 }));
 
-const ACCOUNT = { email: "owner@gmail.com", refresh_token: "refresh-token" };
+const ACCOUNT = {
+  id: "google-account-1",
+  email: "owner@gmail.com",
+  refresh_token: "refresh-token",
+};
+
+const TEST_STATE = {
+  userId: "user-1",
+};
+
 const stub = (id: string) => ({ id, threadId: `t-${id}` });
+
 const doneAction = (id: string) => ({
   message_id: id,
   action_type: "STORE",
@@ -66,18 +76,21 @@ function setupSupabase(options: {
         error: options.accountError ?? null,
       });
     }
+
     if (table === "emails") {
       return createChain({
         data: options.emailsError ? null : (options.emailRows ?? []),
         error: options.emailsError ?? null,
       });
     }
+
     if (table === "email_actions") {
       return createChain({
         data: options.actionsError ? null : (options.actionRows ?? []),
         error: options.actionsError ?? null,
       });
     }
+
     return createChain({ data: [], error: null });
   });
 }
@@ -91,30 +104,53 @@ const db = {
 function wireStatefulSupabase() {
   supabaseMock.from.mockImplementation((table: string) => {
     let ids: string[] = [];
+
     const chain: any = {
       select: () => chain,
       limit: () => chain,
       not: () => chain,
       eq: () => chain,
+
       in: (col: string, values: string[]) => {
-        if (col === "message_id") ids = values;
+        if (col === "message_id") {
+          ids = values;
+        }
+
         return chain;
       },
-      single: () => Promise.resolve({ data: ACCOUNT, error: null }),
+
+      single: () =>
+        Promise.resolve({
+          data: ACCOUNT,
+          error: null,
+        }),
+
       then: (resolve: any, reject: any) => {
         let rows: any[] = [];
+
         if (table === "emails") {
           rows = ids
             .filter((id) => db.emails.has(id))
-            .map((id) => ({ message_id: id, category: db.emails.get(id) }));
+            .map((id) => ({
+              message_id: id,
+              category: db.emails.get(id),
+            }));
         } else if (table === "email_actions") {
           rows = ids.flatMap((id) =>
-            (db.actions.get(id) ?? []).map((a) => ({ message_id: id, ...a }))
+            (db.actions.get(id) ?? []).map((a) => ({
+              message_id: id,
+              ...a,
+            }))
           );
         }
-        return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
+
+        return Promise.resolve({
+          data: rows,
+          error: null,
+        }).then(resolve, reject);
       },
     };
+
     return chain;
   });
 }
@@ -123,20 +159,33 @@ function wireStatefulSupabase() {
 function markProcessed(emails: Email[] | undefined) {
   for (const e of emails ?? []) {
     db.emails.set(e.id, "SPAM");
-    db.actions.set(e.id, [{ action_type: "STORE", status: "COMPLETED" }]);
+    db.actions.set(e.id, [
+      {
+        action_type: "STORE",
+        status: "COMPLETED",
+      },
+    ]);
   }
 }
 
 /** Fake Gmail inbox that honors maxResults + pageToken. */
 function listFromInbox(allIds: string[]) {
   gmailServiceMock.listMessagePage.mockImplementation(
-    async (_token: string, opts?: { maxResults?: number; pageToken?: string }) => {
+    async (
+      _token: string,
+      opts?: {
+        maxResults?: number;
+        pageToken?: string;
+      }
+    ) => {
       const start = opts?.pageToken ? Number(opts.pageToken) : 0;
       const size = opts?.maxResults ?? 100;
       const end = start + size;
+
       return {
         messages: allIds.slice(start, end).map(stub),
-        nextPageToken: end < allIds.length ? String(end) : undefined,
+        nextPageToken:
+          end < allIds.length ? String(end) : undefined,
       };
     }
   );
@@ -144,24 +193,31 @@ function listFromInbox(allIds: string[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+
   db.emails.clear();
   db.actions.clear();
+
   configMock.getGmailSyncConfig.mockReturnValue({
     pageSize: 40,
     maxMessages: 120,
     maxScan: 5000,
   });
+
   gmailServiceMock.getMessage.mockImplementation(
     async (_t: string, id: string) => ({ id })
   );
-  parserMock.parseGmailMessage.mockImplementation((m: { id: string }) =>
-    parsedEmail(m.id)
+
+  parserMock.parseGmailMessage.mockImplementation(
+    (m: { id: string }) => parsedEmail(m.id)
   );
 });
 
 describe("fetchNode", () => {
   it("fetches full bodies only for messages that still need work", async () => {
-    listOnePage(Array.from({ length: 12 }, (_, i) => `m${i + 1}`));
+    listOnePage(
+      Array.from({ length: 12 }, (_, i) => `m${i + 1}`)
+    );
+
     setupSupabase({
       emailRows: ["m1", "m2", "m3", "m4", "m5"].map((id) => ({
         message_id: id,
@@ -170,71 +226,126 @@ describe("fetchNode", () => {
       actionRows: ["m1", "m2", "m3", "m4", "m5"].map(doneAction),
     });
 
-    const result = await fetchNode({} as any);
+    const result = await fetchNode(TEST_STATE as any);
 
     expect(gmailServiceMock.listMessagePage).toHaveBeenCalledWith(
       "refresh-token",
-      { maxResults: 40, pageToken: undefined }
+      {
+        maxResults: 40,
+        pageToken: undefined,
+      }
     );
+
     expect(gmailServiceMock.getMessage).toHaveBeenCalledTimes(7);
+
     expect(result.emails?.map((e) => e.id)).toEqual([
-      "m6", "m7", "m8", "m9", "m10", "m11", "m12",
+      "m6",
+      "m7",
+      "m8",
+      "m9",
+      "m10",
+      "m11",
+      "m12",
     ]);
   });
 
   it("attributes the run to the connected Google account", async () => {
     listOnePage(["m1"]);
     setupSupabase({});
-    const result = await fetchNode({} as any);
+
+    const result = await fetchNode(TEST_STATE as any);
+
     expect(result.accountEmail).toBe("owner@gmail.com");
+    expect(result.googleAccountId).toBe("google-account-1");
   });
 
   it("re-fetches persisted emails that have no classification yet", async () => {
     listOnePage(["m1"]);
-    setupSupabase({ emailRows: [{ message_id: "m1", category: null }] });
 
-    const result = await fetchNode({} as any);
+    setupSupabase({
+      emailRows: [
+        {
+          message_id: "m1",
+          category: null,
+        },
+      ],
+    });
 
-    expect(gmailServiceMock.getMessage).toHaveBeenCalledWith("refresh-token", "m1");
+    const result = await fetchNode(TEST_STATE as any);
+
+    expect(gmailServiceMock.getMessage).toHaveBeenCalledWith(
+      "refresh-token",
+      "m1"
+    );
+
     expect(result.emails).toHaveLength(1);
   });
 
   it("re-fetches classified emails that have NO action row (recovery)", async () => {
     listOnePage(["m1"]);
+
     setupSupabase({
-      emailRows: [{ message_id: "m1", category: "REQUIRES_REPLY" }],
+      emailRows: [
+        {
+          message_id: "m1",
+          category: "REQUIRES_REPLY",
+        },
+      ],
       actionRows: [],
     });
 
-    const result = await fetchNode({} as any);
+    const result = await fetchNode(TEST_STATE as any);
 
     expect(result.emails?.map((e) => e.id)).toEqual(["m1"]);
   });
 
   it("re-fetches classified emails with a pending workflow action", async () => {
     listOnePage(["m1"]);
+
     setupSupabase({
-      emailRows: [{ message_id: "m1", category: "REQUIRES_REPLY" }],
+      emailRows: [
+        {
+          message_id: "m1",
+          category: "REQUIRES_REPLY",
+        },
+      ],
       actionRows: [
-        { message_id: "m1", action_type: "DRAFT_REPLY", status: "PENDING" },
+        {
+          message_id: "m1",
+          action_type: "DRAFT_REPLY",
+          status: "PENDING",
+        },
       ],
     });
 
-    await fetchNode({} as any);
+    await fetchNode(TEST_STATE as any);
 
-    expect(gmailServiceMock.getMessage).toHaveBeenCalledWith("refresh-token", "m1");
+    expect(gmailServiceMock.getMessage).toHaveBeenCalledWith(
+      "refresh-token",
+      "m1"
+    );
   });
 
   it("does not re-fetch when only a non-workflow action is pending", async () => {
     listOnePage(["m1"]);
+
     setupSupabase({
-      emailRows: [{ message_id: "m1", category: "IMPORTANT" }],
+      emailRows: [
+        {
+          message_id: "m1",
+          category: "IMPORTANT",
+        },
+      ],
       actionRows: [
-        { message_id: "m1", action_type: "REVIEW", status: "PENDING" },
+        {
+          message_id: "m1",
+          action_type: "REVIEW",
+          status: "PENDING",
+        },
       ],
     });
 
-    await fetchNode({} as any);
+    await fetchNode(TEST_STATE as any);
 
     expect(gmailServiceMock.getMessage).not.toHaveBeenCalled();
   });
@@ -242,33 +353,45 @@ describe("fetchNode", () => {
   it("skips a message whose full fetch fails and keeps the rest", async () => {
     listOnePage(["m1", "m2"]);
     setupSupabase({});
+
     gmailServiceMock.getMessage.mockImplementation(
       async (_t: string, id: string) => {
-        if (id === "m1") throw new Error("backend error");
+        if (id === "m1") {
+          throw new Error("backend error");
+        }
+
         return { id };
       }
     );
 
-    const result = await fetchNode({} as any);
+    const result = await fetchNode(TEST_STATE as any);
 
     expect(gmailServiceMock.getMessage).toHaveBeenCalledTimes(2);
+
     expect(result.emails?.map((e) => e.id)).toEqual(["m2"]);
   });
 
   it("propagates Gmail list failures with the page index", async () => {
-    gmailServiceMock.listMessagePage.mockRejectedValue(new Error("unauthorized"));
+    gmailServiceMock.listMessagePage.mockRejectedValue(
+      new Error("unauthorized")
+    );
+
     setupSupabase({});
 
-    await expect(fetchNode({} as any)).rejects.toThrow(
+    await expect(fetchNode(TEST_STATE as any)).rejects.toThrow(
       "Gmail list failed on page 0: unauthorized"
     );
   });
 
   it("propagates account lookup failures", async () => {
-    setupSupabase({ accountError: { message: "no rows" } });
+    setupSupabase({
+      accountError: {
+        message: "no rows",
+      },
+    });
 
-    await expect(fetchNode({} as any)).rejects.toThrow(
-      "Failed to get Google account: no rows"
+    await expect(fetchNode(TEST_STATE as any)).rejects.toThrow(
+      "Failed to get Google account for authenticated user: no rows"
     );
   });
 
@@ -276,10 +399,12 @@ describe("fetchNode", () => {
     listOnePage([]);
     setupSupabase({});
 
-    const result = await fetchNode({} as any);
+    const result = await fetchNode(TEST_STATE as any);
 
     expect(result.emails).toEqual([]);
-    expect(supabaseMock.from).toHaveBeenCalledTimes(1); // google_accounts only
+
+    expect(supabaseMock.from).toHaveBeenCalledTimes(1);
+
     expect(gmailServiceMock.getMessage).not.toHaveBeenCalled();
   });
 
@@ -287,9 +412,12 @@ describe("fetchNode", () => {
     listOnePage(["m1", "m1", "m2"]);
     setupSupabase({});
 
-    const result = await fetchNode({} as any);
+    const result = await fetchNode(TEST_STATE as any);
 
-    expect(result.emails?.map((e) => e.id)).toEqual(["m1", "m2"]);
+    expect(result.emails?.map((e) => e.id)).toEqual([
+      "m1",
+      "m2",
+    ]);
   });
 });
 
@@ -300,7 +428,12 @@ describe("fetchNode across multiple runs", () => {
       maxMessages: 100,
       maxScan: 5000,
     });
-    const allIds = Array.from({ length: 250 }, (_, i) => `m${i + 1}`);
+
+    const allIds = Array.from(
+      { length: 250 },
+      (_, i) => `m${i + 1}`
+    );
+
     listFromInbox(allIds);
     wireStatefulSupabase();
 
@@ -310,61 +443,91 @@ describe("fetchNode across multiple runs", () => {
 
     for (let run = 0; run < 3; run++) {
       gmailServiceMock.listMessagePage.mockClear();
-      const result = await fetchNode({} as any);
+
+      const result = await fetchNode(TEST_STATE as any);
+
       const ids = (result.emails ?? []).map((e) => e.id);
+
       runSizes.push(ids.length);
-      listCalls.push(gmailServiceMock.listMessagePage.mock.calls.length);
+      listCalls.push(
+        gmailServiceMock.listMessagePage.mock.calls.length
+      );
+
       seen.push(...ids);
+
       markProcessed(result.emails);
     }
 
     expect(runSizes).toEqual([100, 100, 50]);
+
     // Run 1 stops after one page; later runs page past already-finished mail
     expect(listCalls).toEqual([1, 2, 3]);
+
     expect(seen).toHaveLength(250);
     expect(new Set(seen).size).toBe(250);
 
     // Fully drained: a fourth run has nothing left to fetch
-    const final = await fetchNode({} as any);
+    const final = await fetchNode(TEST_STATE as any);
+
     expect(final.emails).toEqual([]);
   });
 
   it("recovers a message whose fetch failed on the next run, without re-fetching others", async () => {
     listFromInbox(["m1", "m2", "m3"]);
     wireStatefulSupabase();
+
     let failOnce = true;
+
     gmailServiceMock.getMessage.mockImplementation(
       async (_t: string, id: string) => {
         if (id === "m2" && failOnce) {
           failOnce = false;
           throw new Error("503");
         }
+
         return { id };
       }
     );
 
-    const run1 = await fetchNode({} as any);
-    expect(run1.emails?.map((e) => e.id)).toEqual(["m1", "m3"]);
+    const run1 = await fetchNode(TEST_STATE as any);
+
+    expect(run1.emails?.map((e) => e.id)).toEqual([
+      "m1",
+      "m3",
+    ]);
+
     markProcessed(run1.emails);
 
-    const run2 = await fetchNode({} as any);
+    const run2 = await fetchNode(TEST_STATE as any);
+
     expect(run2.emails?.map((e) => e.id)).toEqual(["m2"]);
+
     markProcessed(run2.emails);
 
-    const run3 = await fetchNode({} as any);
+    const run3 = await fetchNode(TEST_STATE as any);
+
     expect(run3.emails).toEqual([]);
   });
 
   it("re-selects a classified email whose action write failed, then stops once the action exists", async () => {
     listFromInbox(["m1"]);
     wireStatefulSupabase();
-    db.emails.set("m1", "REQUIRES_REPLY"); // classified, but no action row
 
-    const run1 = await fetchNode({} as any);
+    db.emails.set("m1", "REQUIRES_REPLY");
+
+    const run1 = await fetchNode(TEST_STATE as any);
+
     expect(run1.emails?.map((e) => e.id)).toEqual(["m1"]);
 
-    db.actions.set("m1", [{ action_type: "DRAFT_REPLY", status: "COMPLETED" }]);
-    const run2 = await fetchNode({} as any);
+    db.actions.set("m1", [
+      {
+        action_type: "DRAFT_REPLY",
+        status: "COMPLETED",
+      },
+    ]);
+
+    const run2 = await fetchNode(TEST_STATE as any);
+
     expect(run2.emails).toEqual([]);
   });
 });

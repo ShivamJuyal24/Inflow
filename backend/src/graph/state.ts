@@ -6,6 +6,22 @@ import type { EmailDraft } from "../types/draft";
 
 export const StateAnnotation = Annotation.Root({
   /**
+   * Supabase Auth user who owns the Google account being triaged.
+   */
+  userId: Annotation<string>({
+    reducer: (_, next) => next,
+    default: () => "",
+  }),
+
+  /**
+   * Google account row that owns the mailbox being triaged.
+   */
+  googleAccountId: Annotation<string>({
+    reducer: (_, next) => next,
+    default: () => "",
+  }),
+
+  /**
    * Email of the connected Google account that owns the mailbox being
    * triaged. Set by fetchNode from google_accounts and used by
    * persistNode for account attribution — never derived from message

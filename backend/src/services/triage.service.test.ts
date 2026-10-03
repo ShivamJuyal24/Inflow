@@ -1,15 +1,43 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runInboxTriage } from "./triage.service";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, supabaseMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  supabaseMock: {
+    from: vi.fn(),
+  },
+}));
 
-vi.mock("../graph/graph", () => ({ graph: { invoke: invokeMock } }));
+vi.mock("../graph/graph", () => ({
+  graph: {
+    invoke: invokeMock,
+  },
+}));
+
+vi.mock("../config/supabase", () => ({
+  supabase: supabaseMock,
+}));
 
 const email = (id: string) => ({ id });
 const classification = (messageId: string) => ({ messageId });
 
+function setupOwnedAccounts(userIds: string[]) {
+  const chain: any = {};
+
+  chain.select = vi.fn(() => chain);
+  chain.not = vi.fn(() => chain);
+  chain.then = (onFulfilled: any, onRejected: any) =>
+    Promise.resolve({
+      data: userIds.map((userId) => ({ user_id: userId })),
+      error: null,
+    }).then(onFulfilled, onRejected);
+
+  supabaseMock.from.mockReturnValue(chain);
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
+
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -24,7 +52,10 @@ describe("runInboxTriage summary", () => {
       drafts: [{ status: "PENDING_REVIEW" }],
     });
 
-    const { summary } = await runInboxTriage("manual");
+    const { summary } = await runInboxTriage(
+      "manual",
+      "user-1"
+    );
 
     expect(summary).toMatchObject({
       emailsFetched: 2,
@@ -36,6 +67,12 @@ describe("runInboxTriage summary", () => {
       meetingActions: 1,
       status: "COMPLETED",
     });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-1",
+      })
+    );
   });
 
   it("reports PARTIAL with a failure count when some emails were not classified", async () => {
@@ -45,6 +82,8 @@ describe("runInboxTriage summary", () => {
       actions: [],
       drafts: [],
     });
+
+    setupOwnedAccounts(["user-1"]);
 
     const { summary } = await runInboxTriage("scheduled");
 
@@ -62,16 +101,22 @@ describe("runInboxTriage summary", () => {
       drafts: [],
     });
 
-    const { summary } = await runInboxTriage("startup");
+    const { summary } = await runInboxTriage(
+      "manual",
+      "user-1"
+    );
 
     expect(summary.emailsUnclassified).toBe(0);
     expect(summary.status).toBe("COMPLETED");
   });
 
-  it("handles an empty run", async () => {
+  it("handles an empty manual run", async () => {
     invokeMock.mockResolvedValue({});
 
-    const { summary } = await runInboxTriage("manual");
+    const { summary } = await runInboxTriage(
+      "manual",
+      "user-1"
+    );
 
     expect(summary).toMatchObject({
       emailsFetched: 0,
@@ -80,11 +125,83 @@ describe("runInboxTriage summary", () => {
     });
   });
 
+  it("requires a user ID for manual triage", async () => {
+    await expect(
+      runInboxTriage("manual")
+    ).rejects.toThrow("TRIAGE_USER_REQUIRED");
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("runs scheduled triage once for each owned user", async () => {
+    setupOwnedAccounts(["user-1", "user-2"]);
+
+    invokeMock
+      .mockResolvedValueOnce({
+        emails: [email("a")],
+        classification: [classification("a")],
+        actions: [],
+        drafts: [],
+      })
+      .mockResolvedValueOnce({
+        emails: [email("b")],
+        classification: [classification("b")],
+        actions: [],
+        drafts: [],
+      });
+
+    const { summary } = await runInboxTriage("scheduled");
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        userId: "user-1",
+      })
+    );
+
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        userId: "user-2",
+      })
+    );
+
+    expect(summary).toMatchObject({
+      emailsFetched: 2,
+      emailsClassified: 2,
+      emailsUnclassified: 0,
+      status: "COMPLETED",
+    });
+  });
+
+  it("does not run background triage when no Google account is owned by a user", async () => {
+    setupOwnedAccounts([]);
+
+    const { summary } = await runInboxTriage("startup");
+
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    expect(summary).toMatchObject({
+      emailsFetched: 0,
+      emailsClassified: 0,
+      emailsUnclassified: 0,
+      status: "COMPLETED",
+    });
+  });
+
   it("still releases the in-progress lock when the graph throws", async () => {
     invokeMock.mockRejectedValueOnce(new Error("boom"));
-    await expect(runInboxTriage("manual")).rejects.toThrow("boom");
+
+    await expect(
+      runInboxTriage("manual", "user-1")
+    ).rejects.toThrow("boom");
 
     invokeMock.mockResolvedValue({});
-    await expect(runInboxTriage("manual")).resolves.toBeDefined();
+
+    await expect(
+      runInboxTriage("manual", "user-1")
+    ).resolves.toBeDefined();
   });
 });

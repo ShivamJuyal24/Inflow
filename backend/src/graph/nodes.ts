@@ -234,23 +234,24 @@ export async function fetchNode(
 ): Promise<Partial<EmailTriageState>> {
   console.log("fetch node running");
 
+  if (!state.userId) {
+    throw new Error("Missing authenticated user ID for Gmail sync");
+  }
+
   const { data, error } = await supabase
     .from("google_accounts")
-    .select("email, refresh_token")
-    .limit(1)
+    .select("id, email, refresh_token")
+    .eq("user_id", state.userId)
     .single();
 
   if (error) {
     throw new Error(
-      `Failed to get Google account: ${error.message}`
+      `Failed to get Google account for authenticated user: ${error.message}`
     );
   }
 
   console.log("📧 Google account:", data.email);
 
-  // Paginate the inbox (newest first) up to the configured per-run
-  // window — GMAIL_PAGE_SIZE per request, at most GMAIL_MAX_MESSAGES
-  // per run (see config/gmailSync.ts).
   const { pageSize, maxMessages, maxScan } = getGmailSyncConfig();
 
   const { ids: idsNeedingFetch, scanned } = await collectIdsNeedingWork(
@@ -263,18 +264,21 @@ export async function fetchNode(
   );
 
   if (idsNeedingFetch.length === 0) {
-    return { emails: [], accountEmail: data.email };
+    return {
+      emails: [],
+      googleAccountId: data.id,
+      accountEmail: data.email,
+    };
   }
 
   const emails: Email[] = [];
 
   for (const messageId of idsNeedingFetch) {
     let fullMessage;
+
     try {
       fullMessage = await getMessage(data.refresh_token, messageId);
     } catch (err: any) {
-      // One unreachable message must not lose the whole batch: skip it
-      // here and leave it unpersisted so the next run retries it.
       console.error(
         `Failed to fetch message ${messageId} — will retry on next run:`,
         err?.message ?? err
@@ -289,6 +293,7 @@ export async function fetchNode(
 
   return {
     emails,
+    googleAccountId: data.id,
     accountEmail: data.email,
   };
 }
@@ -308,31 +313,25 @@ export async function persistNode(
     return {};
   }
 
-  // Attribution: the connected Google account that owns the mailbox —
-  // from graph state (set by fetchNode), with a direct fallback lookup
-  // when persistNode runs outside the normal graph flow.
-  let accountEmail = state.accountEmail;
-
-  if (!accountEmail) {
-    const { data: account, error: accountError } = await supabase
-      .from("google_accounts")
-      .select("email")
-      .limit(1)
-      .single();
-
-    if (accountError) {
-      throw new Error(
-        `Failed to get Google account for attribution: ${accountError.message}`
-      );
-    }
-
-    accountEmail = account.email;
+  if (!state.googleAccountId) {
+    throw new Error(
+      "Missing Google account ID for email ownership attribution"
+    );
   }
+
+  if (!state.accountEmail) {
+    throw new Error(
+      "Missing Google account email for email ownership attribution"
+    );
+  }
+
+  const accountEmail = state.accountEmail;
 
   const rows = state.emails.map((email) => ({
     message_id: email.id,
     thread_id: email.threadId,
     account_email: accountEmail,
+    google_account_id: state.googleAccountId,
     from_email: email.from,
     to_email: email.to,
     subject: email.subject,
@@ -340,18 +339,16 @@ export async function persistNode(
     received_at: email.receivedAt,
   }));
 
-  // Atomic upsert keyed on the unique index over emails.message_id:
-  // a retried or overlapping run conflicts in the database instead of
-  // racing a check-then-insert window. Existing rows are left as-is.
   const { data, error } = await supabase
     .from("emails")
-    .upsert(rows, { onConflict: "message_id", ignoreDuplicates: true })
+    .upsert(rows, {
+      onConflict: "message_id",
+      ignoreDuplicates: true,
+    })
     .select();
 
   if (error) {
-    throw new Error(
-      `Failed to persist emails: ${error.message}`
-    );
+    throw new Error(`Failed to persist emails: ${error.message}`);
   }
 
   console.log(
