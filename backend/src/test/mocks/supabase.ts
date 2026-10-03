@@ -1,3 +1,4 @@
+//mocks/supabase.ts
 import { vi } from "vitest";
 
 const CHAIN_METHODS = [

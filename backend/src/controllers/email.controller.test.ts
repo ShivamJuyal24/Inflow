@@ -1,3 +1,4 @@
+//email.controller.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { listEmails } from "./email.controller";
 import { createChain } from "../test/mocks/supabase";
