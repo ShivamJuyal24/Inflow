@@ -2,6 +2,17 @@ import type { Draft, DraftListResponse, DraftDetailResponse, DraftMutationRespon
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+export class DraftApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly draft?: Draft
+  ) {
+    super(message);
+    this.name = "DraftApiError";
+  }
+}
+
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     headers: { "Content-Type": "application/json" },
@@ -9,7 +20,11 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody.message || errBody.error || `HTTP ${res.status}`);
+    throw new DraftApiError(
+      errBody.message || errBody.error || `HTTP ${res.status}`,
+      res.status,
+      errBody.draft
+    );
   }
   return res.json() as Promise<T>;
 }
@@ -20,6 +35,15 @@ export function listDrafts(): Promise<DraftListResponse> {
 
 export function fetchDraft(emailId: string): Promise<DraftDetailResponse> {
   return fetchJson<DraftDetailResponse>(`${API_BASE}/drafts/${emailId}`);
+}
+
+/** Saves edited reply text. Only works while the draft is PENDING_REVIEW. */
+export async function updateDraft(emailId: string, body: string): Promise<Draft> {
+  const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+  return res.draft;
 }
 
 export async function approveDraft(emailId: string): Promise<Draft> {
@@ -34,5 +58,19 @@ export async function rejectDraft(emailId: string): Promise<Draft> {
 
 export async function sendDraft(emailId: string): Promise<Draft> {
   const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}/send`, { method: "POST" });
+  return res.draft;
+}
+
+export type SendOutcome = "SENT" | "NOT_SENT";
+
+/**
+ * After an uncertain send, report what actually happened (checked in the
+ * Sent folder). SENT marks the draft sent; NOT_SENT lets it be sent again.
+ */
+export async function resolveSend(emailId: string, outcome: SendOutcome): Promise<Draft> {
+  const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}/resolve-send`, {
+    method: "POST",
+    body: JSON.stringify({ outcome }),
+  });
   return res.draft;
 }

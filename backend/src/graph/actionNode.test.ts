@@ -5,25 +5,16 @@ import type { EmailClassification } from "../types/classification";
 import { createChain } from "../test/mocks/supabase";
 
 const { supabaseMock, groqMock } = vi.hoisted(() => ({
-  supabaseMock: {
-    from: vi.fn(),
-  },
-  groqMock: {
-    groq: {
-      chat: {
-        completions: {
-          create: vi.fn(),
-        },
-      },
-    },
-  },
+  supabaseMock: { from: vi.fn() },
+  groqMock: { groq: { chat: { completions: { create: vi.fn() } } } },
 }));
 
 vi.mock("../config/supabase", () => ({ supabase: supabaseMock }));
 vi.mock("../config/groq", () => ({ groq: groqMock.groq }));
 vi.mock("../services/gmail.service", () => ({
   getMessage: vi.fn(),
-  listMessages: vi.fn(),
+  listMessagePage: vi.fn(),
+  listAllMessages: vi.fn(),
   sendReply: vi.fn(),
 }));
 vi.mock("../services/email.parser", () => ({ parseGmailMessage: vi.fn() }));
@@ -38,104 +29,74 @@ const classification = (
   suggested_action: "action",
 });
 
-const stateWith = (classifications: EmailClassification[]) =>
-  ({ classification: classifications }) as unknown as EmailTriageState;
+const stateWith = (c: EmailClassification[]) =>
+  ({ classification: c }) as unknown as EmailTriageState;
 
-beforeEach(() => {
-  vi.clearAllMocks();
-});
+const UPSERT_OPTS = { onConflict: "message_id,action_type", ignoreDuplicates: true };
+
+beforeEach(() => vi.clearAllMocks());
 
 describe("actionNode", () => {
-  it("persists new actions with mapped statuses", async () => {
-    const existingCheck = createChain({ data: [], error: null });
-    const insertChain = createChain({
+  it("upserts new actions with mapped statuses", async () => {
+    const chain = createChain({
       data: [{ message_id: "m1" }, { message_id: "m2" }],
       error: null,
     });
-    supabaseMock.from
-      .mockReturnValueOnce(existingCheck)
-      .mockReturnValueOnce(insertChain);
+    supabaseMock.from.mockReturnValueOnce(chain);
 
     const result = await actionNode(
-      stateWith([
-        classification("m1", "SPAM"),
-        classification("m2", "REQUIRES_REPLY"),
-      ])
+      stateWith([classification("m1", "SPAM"), classification("m2", "REQUIRES_REPLY")])
     );
 
-    expect(insertChain.insert).toHaveBeenCalledWith([
-      { message_id: "m1", action_type: "STORE", status: "COMPLETED" },
-      { message_id: "m2", action_type: "DRAFT_REPLY", status: "PENDING" },
-    ]);
+    expect(supabaseMock.from).toHaveBeenCalledTimes(1);
+    expect(supabaseMock.from).toHaveBeenCalledWith("email_actions");
+    expect(chain.upsert).toHaveBeenCalledWith(
+      [
+        { message_id: "m1", action_type: "STORE", status: "COMPLETED" },
+        { message_id: "m2", action_type: "DRAFT_REPLY", status: "PENDING" },
+      ],
+      UPSERT_OPTS
+    );
     expect(result.actions).toHaveLength(2);
   });
 
-  it("deduplicates duplicate actions within a single run", async () => {
-    const existingCheck = createChain({ data: [], error: null });
-    const insertChain = createChain({ data: [{ message_id: "m1" }], error: null });
-    supabaseMock.from
-      .mockReturnValueOnce(existingCheck)
-      .mockReturnValueOnce(insertChain);
+  it("deduplicates identical actions within a single run", async () => {
+    const chain = createChain({ data: [{ message_id: "m1" }], error: null });
+    supabaseMock.from.mockReturnValueOnce(chain);
 
-    // Two classifications mapping to the same (messageId, action_type) pair
     await actionNode(
-      stateWith([
-        classification("m1", "REQUIRES_REPLY"),
-        classification("m1", "REQUIRES_REPLY"),
-      ])
+      stateWith([classification("m1", "REQUIRES_REPLY"), classification("m1", "REQUIRES_REPLY")])
     );
 
-    expect(insertChain.insert).toHaveBeenCalledTimes(1);
-    expect(insertChain.insert).toHaveBeenCalledWith([
-      { message_id: "m1", action_type: "DRAFT_REPLY", status: "PENDING" },
-    ]);
+    expect(chain.upsert).toHaveBeenCalledTimes(1);
+    expect(chain.upsert).toHaveBeenCalledWith(
+      [{ message_id: "m1", action_type: "DRAFT_REPLY", status: "PENDING" }],
+      UPSERT_OPTS
+    );
   });
 
-  it("skips actions that already exist in the database", async () => {
-    const existingCheck = createChain({
-      data: [{ message_id: "m1", action_type: "DRAFT_REPLY" }],
-      error: null,
-    });
-    supabaseMock.from.mockReturnValueOnce(existingCheck);
+  it("does not throw when every row already existed (conflict → no rows returned)", async () => {
+    supabaseMock.from.mockReturnValueOnce(createChain({ data: [], error: null }));
 
-    const result = await actionNode(
-      stateWith([classification("m1", "REQUIRES_REPLY")])
-    );
+    const result = await actionNode(stateWith([classification("m1", "REQUIRES_REPLY")]));
 
-    // Only ONE query total — the insert must never happen
-    expect(supabaseMock.from).toHaveBeenCalledTimes(1);
     expect(result.actions).toHaveLength(1);
   });
 
-  it("inserts only the new actions when some already exist", async () => {
-    const existingCheck = createChain({
-      data: [{ message_id: "m1", action_type: "DRAFT_REPLY" }],
-      error: null,
-    });
-    const insertChain = createChain({ data: [{ message_id: "m2" }], error: null });
-    supabaseMock.from
-      .mockReturnValueOnce(existingCheck)
-      .mockReturnValueOnce(insertChain);
+  it("makes no database call when there are no classifications", async () => {
+    const result = await actionNode(stateWith([]));
 
-    await actionNode(
-      stateWith([
-        classification("m1", "REQUIRES_REPLY"),
-        classification("m2", "MEETING"),
-      ])
-    );
-
-    expect(insertChain.insert).toHaveBeenCalledWith([
-      { message_id: "m2", action_type: "ANALYZE_MEETING", status: "PENDING" },
-    ]);
+    expect(supabaseMock.from).not.toHaveBeenCalled();
+    expect(result.actions).toEqual([]);
   });
 
-  it("throws when the existing-actions lookup fails", async () => {
+  it("throws when the upsert fails", async () => {
     supabaseMock.from.mockReturnValueOnce(
       createChain({ data: null, error: { message: "boom" } })
     );
 
     await expect(
       actionNode(stateWith([classification("m1", "SPAM")]))
-    ).rejects.toThrow("Failed to check existing email actions");
+    ).rejects.toThrow("Failed to persist email actions: boom");
   });
 });

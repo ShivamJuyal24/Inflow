@@ -4,4 +4,6 @@ export const gmailMock = vi.hoisted(() => ({
   getMessage: vi.fn(),
   sendReply: vi.fn(),
   listMessages: vi.fn(),
+  listMessagePage: vi.fn(),
+  listAllMessages: vi.fn(),
 }));

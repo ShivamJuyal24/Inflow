@@ -6,7 +6,15 @@ import EmailDetail from "@/components/EmailDetail"
 import DraftDetail from "@/components/DraftDetail"
 import TriageRunButton from "@/components/TriageRunButton"
 import { listEmails, getEmail } from "@/lib/emailApi"
-import { fetchDraft, approveDraft, rejectDraft, sendDraft } from "@/lib/draftApi"
+import {
+  fetchDraft,
+  updateDraft,
+  approveDraft,
+  rejectDraft,
+  sendDraft,
+  resolveSend,
+  DraftApiError,
+} from "@/lib/draftApi"
 import type { InboxEmail, Email, EmailCategory } from "@/types/email"
 import type { Draft } from "@/types/draft"
 
@@ -103,7 +111,36 @@ export default function Dashboard() {
       const updated = await fn(emailId)
       setSelectedDraft(updated)
     } catch (err) {
+      if (err instanceof DraftApiError && err.draft) {
+        setSelectedDraft(err.draft)
+      }
       setError(err instanceof Error ? err.message : `${action} failed`)
+    } finally {
+      setDraftAction(null)
+    }
+  }
+
+  const handleDraftSave = async (emailId: string, body: string) => {
+    try {
+      setDraftAction("save")
+      const updated = await updateDraft(emailId, body)
+      setSelectedDraft(updated)
+    } finally {
+      setDraftAction(null)
+    }
+  }
+
+  const handleResolveSend = async (
+    emailId: string,
+    outcome: "SENT" | "NOT_SENT"
+  ) => {
+    const action = outcome === "SENT" ? "resolve-sent" : "resolve-unsent"
+    try {
+      setDraftAction(action)
+      const updated = await resolveSend(emailId, outcome)
+      setSelectedDraft(updated)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resolve send")
     } finally {
       setDraftAction(null)
     }
@@ -152,6 +189,8 @@ export default function Dashboard() {
                 onApprove={(id) => handleDraftAction("approve", id)}
                 onReject={(id) => handleDraftAction("reject", id)}
                 onSend={(id) => handleDraftAction("send", id)}
+                onSave={handleDraftSave}
+                onResolveSend={handleResolveSend}
                 loadingAction={draftAction}
               />
             ) : (

@@ -4,6 +4,8 @@ export type DraftStatus =
   | "PENDING_REVIEW"
   | "APPROVED"
   | "REJECTED"
+  | "SENDING"
+  | "SEND_UNCERTAIN"
   | "SENT";
 
 export interface Draft {

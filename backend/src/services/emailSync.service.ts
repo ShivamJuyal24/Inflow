@@ -65,7 +65,8 @@ export async function syncRecentEmails(maxResults = 20) {
       rows.push({
         message_id: email.id,
         thread_id: email.threadId,
-        account_email: email.to,
+        // The mailbox owner, not the message's To header
+        account_email: account.email,
         from_email: email.from,
         to_email: email.to,
         subject: email.subject,

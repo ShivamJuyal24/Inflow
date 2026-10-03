@@ -37,6 +37,7 @@ async function main() {
   console.log("Subject:", email.subject);
 
   const state: EmailTriageState = {
+    accountEmail: "",
     emails: [email],
 
     classification: [

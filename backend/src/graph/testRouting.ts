@@ -3,6 +3,7 @@ import type { EmailTriageState } from "./state";
 
 function testRoute(name: string, actions: EmailTriageState["actions"]) {
   const result = routeActions({
+    accountEmail: "",
     emails: [],
     classification: [],
     actions,

@@ -11,6 +11,7 @@ export type TriageRunResult = {
 export type TriageTrigger = "startup" | "scheduled" | "manual";
 
 const INITIAL_STATE: EmailTriageState = {
+  accountEmail: "",
   emails: [],
   classification: [],
   actions: [],
@@ -40,10 +41,21 @@ export async function runInboxTriage(
     // Invoke the compiled graph
     const finalState = await graph.invoke(INITIAL_STATE);
 
+    const emails = finalState.emails ?? [];
+    const classification = finalState.classification ?? [];
+
+    // An email is unclassified if the classify node did not return a
+    // persisted classification for it (see classifyNode).
+    const classifiedIds = new Set(classification.map((c) => c.messageId));
+    const emailsUnclassified = emails.filter(
+      (email) => !classifiedIds.has(email.id)
+    ).length;
+
     // Build summary
     const summary: TriageSummary = {
-      emailsFetched: finalState.emails?.length ?? 0,
-      emailsClassified: finalState.classification?.length ?? 0,
+      emailsFetched: emails.length,
+      emailsClassified: classification.length,
+      emailsUnclassified,
       actionsCreated: finalState.actions?.length ?? 0,
       draftsCreated: finalState.drafts?.length ?? 0,
       draftsPendingReview:
@@ -52,9 +64,18 @@ export async function runInboxTriage(
       meetingActions:
         finalState.actions?.filter((a) => a.type === "ANALYZE_MEETING")
           .length ?? 0,
+      status: emailsUnclassified > 0 ? "PARTIAL" : "COMPLETED",
     };
 
-    console.log(`${label} Run completed:`, summary);
+    if (summary.status === "PARTIAL") {
+      console.warn(
+        `${label} Run finished PARTIALLY: ${emailsUnclassified} of ` +
+          `${emails.length} fetched emails were not classified and will be retried:`,
+        summary
+      );
+    } else {
+      console.log(`${label} Run completed:`, summary);
+    }
 
     return { summary };
   } catch (error) {

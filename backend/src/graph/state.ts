@@ -5,6 +5,17 @@ import type { EmailAction } from "../types/action";
 import type { EmailDraft } from "../types/draft";
 
 export const StateAnnotation = Annotation.Root({
+  /**
+   * Email of the connected Google account that owns the mailbox being
+   * triaged. Set by fetchNode from google_accounts and used by
+   * persistNode for account attribution — never derived from message
+   * headers, which hold the sender/recipient, not the mailbox owner.
+   */
+  accountEmail: Annotation<string>({
+    reducer: (_, next) => next,
+    default: () => "",
+  }),
+
   emails: Annotation<Email[]>({
     reducer: (_, next) => next,
     default: () => [],
