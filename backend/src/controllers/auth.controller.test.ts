@@ -8,7 +8,6 @@ const { supabaseMock, oauth2ClientMock } = vi.hoisted(() => ({
     generateAuthUrl: vi.fn(),
     getToken: vi.fn(),
     setCredentials: vi.fn(),
-    
   },
 }));
 
@@ -29,15 +28,23 @@ import {
   googleCallback,
 } from "./auth.controller.js";
 
+const OAUTH_STATE_COOKIE = "oauth_state_nonce";
+
 function createReq(
   options: {
     userId?: string;
     query?: Record<string, unknown>;
+    cookie?: string;
   } = {}
 ) {
   return {
     user: options.userId ? { id: options.userId } : undefined,
     query: options.query ?? {},
+    headers: options.cookie
+      ? {
+          cookie: options.cookie,
+        }
+      : {},
   } as any;
 }
 
@@ -47,6 +54,8 @@ function createRes() {
   res.status = vi.fn(() => res);
   res.json = vi.fn(() => res);
   res.redirect = vi.fn(() => res);
+  res.cookie = vi.fn(() => res);
+  res.clearCookie = vi.fn(() => res);
 
   return res;
 }
@@ -86,7 +95,7 @@ function createGoogleAccountUpsertChain(result: {
   });
 }
 
-function createValidOAuthState(userId: string) {
+async function createValidOAuthState(userId: string) {
   oauth2ClientMock.generateAuthUrl.mockImplementation(
     (options: Record<string, unknown>) => {
       return `https://accounts.google.com/o/oauth2/auth?state=${encodeURIComponent(
@@ -98,16 +107,57 @@ function createValidOAuthState(userId: string) {
   const req = createReq({ userId });
   const res = createRes();
 
-  return googleAuth(req, res).then(() => {
-    const authUrl = oauth2ClientMock.generateAuthUrl.mock.calls[0][0];
-    return authUrl.state as string;
+  await googleAuth(req, res);
+
+  const authUrl = oauth2ClientMock.generateAuthUrl.mock.calls[0][0];
+  const state = authUrl.state as string;
+
+  const cookieCall = res.cookie.mock.calls[0];
+
+  const cookieName = cookieCall?.[0];
+  const nonce = cookieCall?.[1];
+
+  expect(cookieName).toBe(OAUTH_STATE_COOKIE);
+  expect(typeof nonce).toBe("string");
+  expect(nonce.length).toBeGreaterThan(0);
+
+  return {
+    state,
+    nonce: nonce as string,
+  };
+}
+
+function createCookie(nonce: string) {
+  return `${OAUTH_STATE_COOKIE}=${encodeURIComponent(nonce)}`;
+}
+
+async function mockSuccessfulGoogleTokenExchange() {
+  oauth2ClientMock.getToken.mockResolvedValueOnce({
+    tokens: {
+      access_token: "google-access-token",
+      refresh_token: "google-refresh-token",
+      token_type: "Bearer",
+      scope: "scope-a scope-b",
+      expiry_date: Date.now() + 3600000,
+    },
   });
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        email: "connected@gmail.com",
+      }),
+    })
+  );
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
 
   process.env.SUPABASE_SECRET_KEY = "test-secret-key";
+  process.env.NODE_ENV = "test";
 });
 
 describe("googleAuth", () => {
@@ -121,42 +171,59 @@ describe("googleAuth", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Authentication required",
     });
+
     expect(oauth2ClientMock.generateAuthUrl).not.toHaveBeenCalled();
+    expect(res.cookie).not.toHaveBeenCalled();
   });
 
-it("generates a Google OAuth URL containing a signed state for the authenticated user", async () => {
-  oauth2ClientMock.generateAuthUrl.mockReturnValue(
-    "https://accounts.google.com/o/oauth2/auth"
-  );
+  it("generates a Google OAuth URL containing a signed state for the authenticated user", async () => {
+    oauth2ClientMock.generateAuthUrl.mockReturnValue(
+      "https://accounts.google.com/o/oauth2/auth"
+    );
 
-  const req = createReq({
-    userId: "auth-user-123",
+    const req = createReq({
+      userId: "auth-user-123",
+    });
+
+    const res = createRes();
+
+    await googleAuth(req, res);
+
+    expect(oauth2ClientMock.generateAuthUrl).toHaveBeenCalledTimes(1);
+
+    const options =
+      oauth2ClientMock.generateAuthUrl.mock.calls[0][0];
+
+    expect(options.access_type).toBe("offline");
+    expect(options.prompt).toBe("consent");
+    expect(options.scope).toEqual(["scope-a", "scope-b"]);
+    expect(typeof options.state).toBe("string");
+    expect(options.state).toContain(".");
+
+    expect(res.cookie).toHaveBeenCalledTimes(1);
+    expect(res.cookie).toHaveBeenCalledWith(
+      OAUTH_STATE_COOKIE,
+      expect.any(String),
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: false,
+        path: "/",
+        maxAge: 10 * 60 * 1000,
+      }
+    );
+
+    expect(res.redirect).toHaveBeenCalledTimes(1);
+    expect(res.redirect).toHaveBeenCalledWith(
+      "https://accounts.google.com/o/oauth2/auth"
+    );
   });
-  const res = createRes();
-
-  await googleAuth(req, res);
-
-  expect(oauth2ClientMock.generateAuthUrl).toHaveBeenCalledTimes(1);
-
-  const options =
-    oauth2ClientMock.generateAuthUrl.mock.calls[0][0];
-
-  expect(options.access_type).toBe("offline");
-  expect(options.prompt).toBe("consent");
-  expect(options.scope).toEqual(["scope-a", "scope-b"]);
-  expect(typeof options.state).toBe("string");
-  expect(options.state).toContain(".");
-
-  expect(res.redirect).toHaveBeenCalledTimes(1);
-  expect(res.redirect).toHaveBeenCalledWith(
-    "https://accounts.google.com/o/oauth2/auth"
-  );
-});
 
   it("uses the authenticated user ID when generating OAuth state", async () => {
     const firstReq = createReq({
       userId: "user-one",
     });
+
     const firstRes = createRes();
 
     await googleAuth(firstReq, firstRes);
@@ -169,6 +236,7 @@ it("generates a Google OAuth URL containing a signed state for the authenticated
     const secondReq = createReq({
       userId: "user-two",
     });
+
     const secondRes = createRes();
 
     await googleAuth(secondReq, secondRes);
@@ -178,6 +246,32 @@ it("generates a Google OAuth URL containing a signed state for the authenticated
 
     expect(firstState).not.toBe(secondState);
   });
+
+  it("generates a unique nonce for each OAuth initiation", async () => {
+    const firstReq = createReq({
+      userId: "auth-user-123",
+    });
+
+    const firstRes = createRes();
+
+    await googleAuth(firstReq, firstRes);
+
+    const firstNonce = firstRes.cookie.mock.calls[0][1];
+
+    vi.clearAllMocks();
+
+    const secondReq = createReq({
+      userId: "auth-user-123",
+    });
+
+    const secondRes = createRes();
+
+    await googleAuth(secondReq, secondRes);
+
+    const secondNonce = secondRes.cookie.mock.calls[0][1];
+
+    expect(firstNonce).not.toBe(secondNonce);
+  });
 });
 
 describe("googleCallback", () => {
@@ -185,6 +279,7 @@ describe("googleCallback", () => {
     const req = createReq({
       query: {},
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -193,6 +288,7 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Authorization code missing",
     });
+
     expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
   });
 
@@ -202,6 +298,7 @@ describe("googleCallback", () => {
         code: "google-code",
       },
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -210,11 +307,12 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "OAuth state missing",
     });
+
     expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
   });
 
   it("rejects a tampered OAuth state", async () => {
-    const state = await createValidOAuthState("auth-user-123");
+    const { state } = await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
@@ -226,6 +324,7 @@ describe("googleCallback", () => {
         state: tamperedState,
       },
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -234,24 +333,137 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Invalid or expired OAuth state",
     });
+
     expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
   });
 
-  it("stores the Google account with the authenticated Supabase user ID", async () => {
-    const userId = "auth-user-123";
-    const state = await createValidOAuthState(userId);
+  it("rejects a callback when the OAuth state cookie is missing", async () => {
+    const { state } = await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-        token_type: "Bearer",
-        scope: "scope-a scope-b",
-        expiry_date: Date.now() + 3600000,
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
       },
     });
+
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Invalid OAuth state",
+    });
+
+    expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
+    expect(supabaseMock.from).not.toHaveBeenCalled();
+  });
+
+  it("rejects a callback when the OAuth state cookie nonce does not match", async () => {
+    const { state } = await createValidOAuthState("auth-user-123");
+
+    vi.clearAllMocks();
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+      cookie: createCookie("attacker-controlled-nonce"),
+    });
+
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Invalid OAuth state",
+    });
+
+    expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
+    expect(supabaseMock.from).not.toHaveBeenCalled();
+    expect(res.clearCookie).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired OAuth state", async () => {
+    const originalNow = Date.now;
+
+    const issuedAt = originalNow() - 10 * 60 * 1000 - 1;
+
+    vi.spyOn(Date, "now").mockReturnValueOnce(issuedAt);
+
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
+
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+      cookie: createCookie(nonce),
+    });
+
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Invalid or expired OAuth state",
+    });
+
+    expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects a future-dated OAuth state", async () => {
+    const originalNow = Date.now;
+
+    const issuedAt = originalNow() + 60 * 1000;
+
+    vi.spyOn(Date, "now").mockReturnValueOnce(issuedAt);
+
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
+
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+      cookie: createCookie(nonce),
+    });
+
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Invalid or expired OAuth state",
+    });
+
+    expect(oauth2ClientMock.getToken).not.toHaveBeenCalled();
+  });
+
+  it("stores the Google account with the signed OAuth user ID when the browser nonce matches", async () => {
+    const userId = "auth-user-123";
+
+    const { state, nonce } =
+      await createValidOAuthState(userId);
+
+    vi.clearAllMocks();
+
+    await mockSuccessfulGoogleTokenExchange();
 
     const upsertMock = vi.fn(() =>
       Promise.resolve({
@@ -265,24 +477,14 @@ describe("googleCallback", () => {
       upsert: upsertMock,
     });
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = createReq({
       query: {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -315,27 +517,32 @@ describe("googleCallback", () => {
       }
     );
 
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      OAUTH_STATE_COOKIE,
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: false,
+        path: "/",
+      }
+    );
+
     expect(res.json).toHaveBeenCalledWith({
       message: "Google OAuth successful",
       email: "connected@gmail.com",
       refreshTokenStored: true,
     });
-
-    vi.stubGlobal("fetch", originalFetch);
   });
 
   it("does not trust a client-provided user ID when saving the account", async () => {
     const authenticatedUserId = "verified-user-123";
-    const state = await createValidOAuthState(authenticatedUserId);
+
+    const { state, nonce } =
+      await createValidOAuthState(authenticatedUserId);
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-      },
-    });
+    await mockSuccessfulGoogleTokenExchange();
 
     const upsertMock = vi.fn(() =>
       Promise.resolve({
@@ -349,18 +556,6 @@ describe("googleCallback", () => {
       upsert: upsertMock,
     });
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = {
       user: {
         id: "attacker-controlled-user",
@@ -371,6 +566,9 @@ describe("googleCallback", () => {
       },
       body: {
         userId: "attacker-controlled-user",
+      },
+      headers: {
+        cookie: createCookie(nonce),
       },
     } as any;
 
@@ -393,22 +591,17 @@ describe("googleCallback", () => {
       }),
       expect.anything()
     );
-
-    vi.stubGlobal("fetch", originalFetch);
   });
 
   it("allows reconnecting a Google account already owned by the same user", async () => {
     const userId = "auth-user-123";
-    const state = await createValidOAuthState(userId);
+
+    const { state, nonce } =
+      await createValidOAuthState(userId);
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-      },
-    });
+    await mockSuccessfulGoogleTokenExchange();
 
     const upsertMock = vi.fn(() =>
       Promise.resolve({
@@ -424,24 +617,14 @@ describe("googleCallback", () => {
       upsert: upsertMock,
     });
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = createReq({
       query: {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -461,23 +644,18 @@ describe("googleCallback", () => {
       email: "connected@gmail.com",
       refreshTokenStored: true,
     });
-
-    vi.stubGlobal("fetch", originalFetch);
   });
 
   it("rejects an existing Google account owned by another user without overwriting it", async () => {
     const authenticatedUserId = "auth-user-123";
     const existingOwnerId = "different-user-456";
-    const state = await createValidOAuthState(authenticatedUserId);
+
+    const { state, nonce } =
+      await createValidOAuthState(authenticatedUserId);
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-      },
-    });
+    await mockSuccessfulGoogleTokenExchange();
 
     const upsertMock = vi.fn(() =>
       Promise.resolve({
@@ -493,24 +671,14 @@ describe("googleCallback", () => {
       upsert: upsertMock,
     });
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = createReq({
       query: {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -519,22 +687,17 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Google account is already connected to another user",
     });
-    expect(upsertMock).not.toHaveBeenCalled();
 
-    vi.stubGlobal("fetch", originalFetch);
+    expect(upsertMock).not.toHaveBeenCalled();
   });
 
   it("returns 500 when the Google account ownership lookup fails", async () => {
-    const state = await createValidOAuthState("auth-user-123");
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-      },
-    });
+    await mockSuccessfulGoogleTokenExchange();
 
     const upsertMock = vi.fn();
 
@@ -547,24 +710,14 @@ describe("googleCallback", () => {
       upsert: upsertMock,
     });
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = createReq({
       query: {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -573,13 +726,13 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Failed to verify Google account ownership",
     });
-    expect(upsertMock).not.toHaveBeenCalled();
 
-    vi.stubGlobal("fetch", originalFetch);
+    expect(upsertMock).not.toHaveBeenCalled();
   });
 
   it("rejects the callback when Google does not return an access token", async () => {
-    const state = await createValidOAuthState("auth-user-123");
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
@@ -594,7 +747,9 @@ describe("googleCallback", () => {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -603,11 +758,13 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Access token not received from Google",
     });
+
     expect(supabaseMock.from).not.toHaveBeenCalled();
   });
 
   it("rejects the callback when Google does not return a refresh token", async () => {
-    const state = await createValidOAuthState("auth-user-123");
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
@@ -616,8 +773,6 @@ describe("googleCallback", () => {
         access_token: "google-access-token",
       },
     });
-
-    const originalFetch = globalThis.fetch;
 
     vi.stubGlobal(
       "fetch",
@@ -634,7 +789,9 @@ describe("googleCallback", () => {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -643,22 +800,17 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Refresh token not found",
     });
-    expect(supabaseMock.from).not.toHaveBeenCalled();
 
-    vi.stubGlobal("fetch", originalFetch);
+    expect(supabaseMock.from).not.toHaveBeenCalled();
   });
 
   it("returns 500 when saving the Google account fails", async () => {
-    const state = await createValidOAuthState("auth-user-123");
+    const { state, nonce } =
+      await createValidOAuthState("auth-user-123");
 
     vi.clearAllMocks();
 
-    oauth2ClientMock.getToken.mockResolvedValueOnce({
-      tokens: {
-        access_token: "google-access-token",
-        refresh_token: "google-refresh-token",
-      },
-    });
+    await mockSuccessfulGoogleTokenExchange();
 
     supabaseMock.from.mockReturnValue(
       createGoogleAccountUpsertChain({
@@ -668,24 +820,14 @@ describe("googleCallback", () => {
       })
     );
 
-    const originalFetch = globalThis.fetch;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: vi.fn().mockResolvedValue({
-          email: "connected@gmail.com",
-        }),
-      })
-    );
-
     const req = createReq({
       query: {
         code: "google-code",
         state,
       },
+      cookie: createCookie(nonce),
     });
+
     const res = createRes();
 
     await googleCallback(req, res);
@@ -694,8 +836,5 @@ describe("googleCallback", () => {
     expect(res.json).toHaveBeenCalledWith({
       message: "Failed to save Google account",
     });
-
-    vi.stubGlobal("fetch", originalFetch);
   });
 });
-

@@ -1,14 +1,16 @@
-
 import { Request, Response } from "express";
 import { oauth2Client } from "../config/google.js";
 import { GOOGLE_SCOPES } from "../config/googleScopes.js";
 import { supabase } from "../config/supabase.js";
 import crypto from "node:crypto";
+
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
+const OAUTH_STATE_COOKIE = "oauth_state_nonce";
 
 type OAuthStatePayload = {
   userId: string;
   issuedAt: number;
+  nonce: string;
 };
 
 function getOAuthStateSecret(): string {
@@ -63,12 +65,16 @@ function verifyOAuthState(state: string): OAuthStatePayload | null {
 
     if (
       typeof payload.userId !== "string" ||
-      typeof payload.issuedAt !== "number"
+      typeof payload.issuedAt !== "number" ||
+      typeof payload.nonce !== "string" ||
+      payload.nonce.length === 0
     ) {
       return null;
     }
 
-    if (Date.now() - payload.issuedAt > OAUTH_STATE_MAX_AGE_MS) {
+    const stateAge = Date.now() - payload.issuedAt;
+
+    if (stateAge < 0 || stateAge > OAUTH_STATE_MAX_AGE_MS) {
       return null;
     }
 
@@ -76,6 +82,43 @@ function verifyOAuthState(state: string): OAuthStatePayload | null {
   } catch {
     return null;
   }
+}
+
+function getCookie(req: Request, name: string): string | undefined {
+  const cookieHeader = req.headers.cookie;
+
+  if (!cookieHeader) {
+    return undefined;
+  }
+
+  const prefix = `${name}=`;
+
+  for (const cookie of cookieHeader.split(";")) {
+    const trimmedCookie = cookie.trim();
+
+    if (!trimmedCookie.startsWith(prefix)) {
+      continue;
+    }
+
+    const value = trimmedCookie.slice(prefix.length);
+
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function getOAuthCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  };
 }
 
 export const googleAuth = async (req: Request, res: Response) => {
@@ -86,9 +129,17 @@ export const googleAuth = async (req: Request, res: Response) => {
       });
     }
 
+    const nonce = crypto.randomBytes(32).toString("base64url");
+
     const state = signOAuthState({
       userId: req.user.id,
       issuedAt: Date.now(),
+      nonce,
+    });
+
+    res.cookie(OAUTH_STATE_COOKIE, nonce, {
+      ...getOAuthCookieOptions(),
+      maxAge: OAUTH_STATE_MAX_AGE_MS,
     });
 
     const authUrl = oauth2Client.generateAuthUrl({
@@ -134,6 +185,21 @@ export const googleCallback = async (
         message: "Invalid or expired OAuth state",
       });
     }
+
+    const storedNonce = getCookie(req, OAUTH_STATE_COOKIE);
+
+    if (!storedNonce || storedNonce !== statePayload.nonce) {
+      return res.status(400).json({
+        message: "Invalid OAuth state",
+      });
+    }
+
+    // Consume the OAuth state cookie before exchanging the authorization code.
+    // This prevents the same browser-bound state from being replayed.
+    res.clearCookie(
+      OAUTH_STATE_COOKIE,
+      getOAuthCookieOptions()
+    );
 
     // Exchange authorization code for Google tokens
     const { tokens } = await oauth2Client.getToken(code);
