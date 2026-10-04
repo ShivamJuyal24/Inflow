@@ -47,6 +47,7 @@ const email = (id: string) => ({
 
 const unclassifiedRow = (messageId: string) => ({
   message_id: messageId,
+  google_account_id: "account-1",
   category: null,
   classification_reason: null,
   suggested_action: null,
@@ -54,7 +55,11 @@ const unclassifiedRow = (messageId: string) => ({
 });
 
 const stateFor = (...ids: string[]) =>
-  ({ emails: ids.map(email), classification: [] }) as any;
+  ({
+    emails: ids.map(email),
+    classification: [],
+    googleAccountId: "account-1",
+  }) as any;
 
 /** The node sleeps between provider calls; run it on fake timers. */
 async function run(state: any) {
@@ -134,6 +139,43 @@ describe("classifyNode", () => {
         suggested_action: "stored action",
       },
     ]);
+  });
+
+  it("does not reuse a stored classification from another Google account", async () => {
+    const fake = setup([
+      {
+        ...unclassifiedRow("m1"),
+        google_account_id: "different-account",
+        category: "SPAM",
+        classification_reason: "other user's classification",
+        suggested_action: "ignore",
+      },
+    ]);
+
+    fetchMock.mockResolvedValueOnce(jevOk("IMPORTANT"));
+
+    const result = await run(stateFor("m1"));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.classification).toEqual([]);
+    expect(fake.tables.emails[0].category).toBe("SPAM");
+  });
+
+  it("does not update an email belonging to another Google account", async () => {
+    const fake = setup([
+      {
+        ...unclassifiedRow("m1"),
+        google_account_id: "different-account",
+      },
+    ]);
+
+    fetchMock.mockResolvedValueOnce(jevOk("IMPORTANT"));
+
+    const result = await run(stateFor("m1"));
+
+    expect(result.classification).toEqual([]);
+    expect(fake.tables.emails[0].category).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("omits an email whose provider call fails, but still classifies the rest", async () => {
@@ -217,3 +259,5 @@ describe("classifyNode", () => {
     expect(idsOf(result)).toEqual(["m1"]);
   });
 });
+
+

@@ -442,6 +442,7 @@ export async function classifyNode(
         "message_id, category, classification_reason, suggested_action, classified_at"
       )
       .in("message_id", chunk)
+      .eq("google_account_id", state.googleAccountId)
       .not("category", "is", null);
 
     if (error) {
@@ -541,6 +542,7 @@ export async function classifyNode(
           classified_at: new Date().toISOString(),
         })
         .eq("message_id", email.id)
+        .eq("google_account_id", state.googleAccountId)
         .select("message_id");
 
       if (updateError) {
