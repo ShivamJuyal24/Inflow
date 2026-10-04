@@ -8,7 +8,7 @@ const { supabaseMock, oauth2ClientMock } = vi.hoisted(() => ({
     generateAuthUrl: vi.fn(),
     getToken: vi.fn(),
     setCredentials: vi.fn(),
-    refreshAccessToken: vi.fn(),
+    
   },
 }));
 
