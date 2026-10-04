@@ -76,7 +76,7 @@ function verifyOAuthState(state: string): OAuthStatePayload | null {
   } catch {
     return null;
   }
-};
+}
 
 export const googleAuth = async (req: Request, res: Response) => {
   try {
@@ -193,6 +193,32 @@ export const googleCallback = async (
     if (!tokens.refresh_token) {
       return res.status(400).json({
         message: "Refresh token not found",
+      });
+    }
+
+    // Verify that an existing Google account is either owned by this user
+    // or does not exist yet. Never transfer an existing account to another user.
+    const { data: existingAccount, error: ownershipLookupError } =
+      await supabase
+        .from("google_accounts")
+        .select("user_id")
+        .eq("email", email)
+        .maybeSingle();
+
+    if (ownershipLookupError) {
+      console.error(
+        "Supabase ownership lookup error:",
+        ownershipLookupError
+      );
+
+      return res.status(500).json({
+        message: "Failed to verify Google account ownership",
+      });
+    }
+
+    if (existingAccount && existingAccount.user_id !== statePayload.userId) {
+      return res.status(403).json({
+        message: "Google account is already connected to another user",
       });
     }
 

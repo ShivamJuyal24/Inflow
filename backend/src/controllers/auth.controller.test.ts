@@ -51,13 +51,39 @@ function createRes() {
   return res;
 }
 
+function createGoogleAccountChain(options: {
+  existingAccount?: { user_id: string | null } | null;
+  lookupError?: any;
+  upsertResult?: { data?: any; error?: any };
+} = {}) {
+  const upsertMock = vi.fn(() =>
+    Promise.resolve(options.upsertResult ?? { data: null, error: null })
+  );
+
+  const maybeSingleMock = vi.fn(() =>
+    Promise.resolve({
+      data: options.existingAccount ?? null,
+      error: options.lookupError ?? null,
+    })
+  );
+
+  return {
+    select: vi.fn(() => ({
+      eq: vi.fn(() => ({
+        maybeSingle: maybeSingleMock,
+      })),
+    })),
+    upsert: upsertMock,
+  };
+}
+
 function createGoogleAccountUpsertChain(result: {
   data?: any;
   error?: any;
 }) {
-  return {
-    upsert: vi.fn(() => Promise.resolve(result)),
-  };
+  return createGoogleAccountChain({
+    upsertResult: result,
+  });
 }
 
 function createValidOAuthState(userId: string) {
@@ -235,6 +261,7 @@ describe("googleCallback", () => {
     );
 
     supabaseMock.from.mockReturnValue({
+      ...createGoogleAccountChain(),
       upsert: upsertMock,
     });
 
@@ -318,6 +345,7 @@ describe("googleCallback", () => {
     );
 
     supabaseMock.from.mockReturnValue({
+      ...createGoogleAccountChain(),
       upsert: upsertMock,
     });
 
@@ -365,6 +393,187 @@ describe("googleCallback", () => {
       }),
       expect.anything()
     );
+
+    vi.stubGlobal("fetch", originalFetch);
+  });
+
+  it("allows reconnecting a Google account already owned by the same user", async () => {
+    const userId = "auth-user-123";
+    const state = await createValidOAuthState(userId);
+
+    vi.clearAllMocks();
+
+    oauth2ClientMock.getToken.mockResolvedValueOnce({
+      tokens: {
+        access_token: "google-access-token",
+        refresh_token: "google-refresh-token",
+      },
+    });
+
+    const upsertMock = vi.fn(() =>
+      Promise.resolve({
+        data: null,
+        error: null,
+      })
+    );
+
+    supabaseMock.from.mockReturnValue({
+      ...createGoogleAccountChain({
+        existingAccount: { user_id: userId },
+      }),
+      upsert: upsertMock,
+    });
+
+    const originalFetch = globalThis.fetch;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          email: "connected@gmail.com",
+        }),
+      })
+    );
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+    });
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(upsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "connected@gmail.com",
+        user_id: userId,
+      }),
+      {
+        onConflict: "email",
+      }
+    );
+
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Google OAuth successful",
+      email: "connected@gmail.com",
+      refreshTokenStored: true,
+    });
+
+    vi.stubGlobal("fetch", originalFetch);
+  });
+
+  it("rejects an existing Google account owned by another user without overwriting it", async () => {
+    const authenticatedUserId = "auth-user-123";
+    const existingOwnerId = "different-user-456";
+    const state = await createValidOAuthState(authenticatedUserId);
+
+    vi.clearAllMocks();
+
+    oauth2ClientMock.getToken.mockResolvedValueOnce({
+      tokens: {
+        access_token: "google-access-token",
+        refresh_token: "google-refresh-token",
+      },
+    });
+
+    const upsertMock = vi.fn(() =>
+      Promise.resolve({
+        data: null,
+        error: null,
+      })
+    );
+
+    supabaseMock.from.mockReturnValue({
+      ...createGoogleAccountChain({
+        existingAccount: { user_id: existingOwnerId },
+      }),
+      upsert: upsertMock,
+    });
+
+    const originalFetch = globalThis.fetch;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          email: "connected@gmail.com",
+        }),
+      })
+    );
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+    });
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Google account is already connected to another user",
+    });
+    expect(upsertMock).not.toHaveBeenCalled();
+
+    vi.stubGlobal("fetch", originalFetch);
+  });
+
+  it("returns 500 when the Google account ownership lookup fails", async () => {
+    const state = await createValidOAuthState("auth-user-123");
+
+    vi.clearAllMocks();
+
+    oauth2ClientMock.getToken.mockResolvedValueOnce({
+      tokens: {
+        access_token: "google-access-token",
+        refresh_token: "google-refresh-token",
+      },
+    });
+
+    const upsertMock = vi.fn();
+
+    supabaseMock.from.mockReturnValue({
+      ...createGoogleAccountChain({
+        lookupError: {
+          message: "database unavailable",
+        },
+      }),
+      upsert: upsertMock,
+    });
+
+    const originalFetch = globalThis.fetch;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          email: "connected@gmail.com",
+        }),
+      })
+    );
+
+    const req = createReq({
+      query: {
+        code: "google-code",
+        state,
+      },
+    });
+    const res = createRes();
+
+    await googleCallback(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      message: "Failed to verify Google account ownership",
+    });
+    expect(upsertMock).not.toHaveBeenCalled();
 
     vi.stubGlobal("fetch", originalFetch);
   });
