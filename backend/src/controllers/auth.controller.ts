@@ -1,9 +1,9 @@
-import crypto from "node:crypto";
+
 import { Request, Response } from "express";
 import { oauth2Client } from "../config/google.js";
 import { GOOGLE_SCOPES } from "../config/googleScopes.js";
 import { supabase } from "../config/supabase.js";
-
+import crypto from "node:crypto";
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
 type OAuthStatePayload = {
@@ -256,53 +256,6 @@ export const googleCallback = async (
 
     return res.status(500).json({
       message: "OAuth failed",
-    });
-  }
-};
-
-export const testGoogleRefresh = async (
-  _req: Request,
-  res: Response
-) => {
-  try {
-    // Get the stored Google account
-    const { data: account, error } = await supabase
-      .from("google_accounts")
-      .select("email, refresh_token")
-      .eq("email", "shivamjuyal.dev@gmail.com")
-      .single();
-
-    if (error || !account) {
-      console.error("Supabase error:", error);
-
-      return res.status(404).json({
-        message: "Google account not found",
-      });
-    }
-
-    // Give the refresh token to Google's OAuth client
-    oauth2Client.setCredentials({
-      refresh_token: account.refresh_token,
-    });
-
-    // Ask Google for a fresh access token
-    const { credentials } =
-      await oauth2Client.refreshAccessToken();
-
-    console.log("Refresh successful:", {
-      hasAccessToken: !!credentials.access_token,
-      expiryDate: credentials.expiry_date,
-    });
-
-    return res.json({
-      message: "Token refresh successful",
-      hasAccessToken: !!credentials.access_token,
-    });
-  } catch (error) {
-    console.error("Token refresh error:", error);
-
-    return res.status(500).json({
-      message: "Token refresh failed",
     });
   }
 };
