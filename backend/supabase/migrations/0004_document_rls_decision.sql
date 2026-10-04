@@ -1,0 +1,18 @@
+-- Step 10: RLS / defense-in-depth decision.
+--
+-- Row Level Security is enabled on the application tables, but no RLS
+-- policies are defined intentionally.
+--
+-- The application uses a privileged backend Supabase client for database
+-- operations. User authentication is performed in the API layer through
+-- requireAuth, and application queries enforce ownership using the
+-- authenticated user's ID and the ownership relationships established in
+-- previous migrations.
+--
+-- The backend database client does not execute queries with the end user's
+-- JWT, so auth.uid()-based policies would not map directly to the current
+-- request authorization model and could interfere with legitimate backend
+-- operations.
+--
+-- Therefore, authorization remains enforced by the backend application layer
+-- while RLS remains enabled as a database-level safety mechanism.
