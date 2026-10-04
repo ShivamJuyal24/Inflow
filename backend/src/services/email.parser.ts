@@ -225,5 +225,6 @@ export function parseGmailMessage(message: gmail_v1.Schema$Message): Email {
     subject: getHeader(headers, "Subject"),
     body: message.payload ? extractBody(message.payload) : "",
     receivedAt: parseReceivedAt(headers),
+    labels: message.labelIds ?? [],
   };
 }

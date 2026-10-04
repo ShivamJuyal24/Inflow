@@ -35,7 +35,7 @@ const jevError = (status: number, message = "provider error") => ({
   json: async () => ({ error: { message } }),
 });
 
-const email = (id: string) => ({
+const email = (id: string, labels?: string[]) => ({
   id,
   threadId: `t-${id}`,
   from: "sender@example.com",
@@ -43,6 +43,7 @@ const email = (id: string) => ({
   subject: `Subject ${id}`,
   body: `Body of ${id}`,
   receivedAt: "2026-10-01T00:00:00.000Z",
+  labels,
 });
 
 const unclassifiedRow = (messageId: string) => ({
@@ -56,10 +57,13 @@ const unclassifiedRow = (messageId: string) => ({
 
 const stateFor = (...ids: string[]) =>
   ({
-    emails: ids.map(email),
+    emails: ids.map((id) => email(id)),
     classification: [],
     googleAccountId: "account-1",
   }) as any;
+
+const stateForEmails = (emails: any[]) =>
+  ({ emails, classification: [], googleAccountId: "account-1" }) as any;
 
 /** The node sleeps between provider calls; run it on fake timers. */
 async function run(state: any) {
@@ -248,6 +252,51 @@ describe("classifyNode", () => {
       /JEVMODEL_API_KEY/
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("classifies Gmail low-value categories deterministically without calling the provider", async () => {
+    const fake = setup([
+      unclassifiedRow("m1"),
+      unclassifiedRow("m2"),
+      unclassifiedRow("m3"),
+      unclassifiedRow("m4"),
+    ]);
+
+    const state = stateForEmails([
+      email("m1", ["INBOX", "CATEGORY_PROMOTIONS"]),
+      email("m2", ["INBOX", "CATEGORY_SOCIAL"]),
+      email("m3", ["INBOX", "CATEGORY_FORUMS"]),
+      email("m4", ["INBOX", "CATEGORY_PRIMARY"]),
+    ]);
+
+    fetchMock.mockResolvedValueOnce(jevOk("IMPORTANT"));
+
+    const result = await run(state);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only m4 went to the LLM
+    const byId = new Map(
+      (result.classification as any[]).map((c) => [c.messageId, c])
+    );
+    expect(byId.get("m1")?.category).toBe("LOW_PRIORITY");
+    expect(byId.get("m2")?.category).toBe("LOW_PRIORITY");
+    expect(byId.get("m3")?.category).toBe("LOW_PRIORITY");
+    expect(byId.get("m4")?.category).toBe("IMPORTANT");
+    expect(fake.tables.emails[0].category).toBe("LOW_PRIORITY");
+    expect(fake.tables.emails[1].category).toBe("LOW_PRIORITY");
+    expect(fake.tables.emails[2].category).toBe("LOW_PRIORITY");
+    expect(fake.tables.emails[3].category).toBe("IMPORTANT");
+  });
+
+  it("still sends CATEGORY_UPDATES emails to the LLM provider", async () => {
+    setup([unclassifiedRow("m1")]);
+    fetchMock.mockResolvedValueOnce(jevOk("INFORMATIONAL"));
+
+    const result = await run(
+      stateForEmails([email("m1", ["INBOX", "CATEGORY_UPDATES"])])
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(idsOf(result)).toEqual(["m1"]);
   });
 
   it("does not need the API key when everything is already classified", async () => {

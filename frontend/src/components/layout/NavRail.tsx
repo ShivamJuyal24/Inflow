@@ -1,5 +1,7 @@
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { Link, useNavigate } from "react-router-dom"
+import { useAuth } from "@/auth/AuthProvider"
 import {
   Inbox,
   Star,
@@ -88,6 +90,14 @@ function NavButton({
 }
 
 export default function NavRail({ active, onChange }: NavRailProps) {
+  const { signOut } = useAuth()
+  const navigate = useNavigate()
+
+  const handleSignOut = async () => {
+    await signOut()
+    navigate("/login")
+  }
+
   return (
     <nav className="flex h-full w-56 shrink-0 flex-col gap-1 border-r border-border bg-background p-3">
       <h2 className="px-3 pb-2 text-lg font-semibold tracking-tight">Inflow</h2>
@@ -110,6 +120,16 @@ export default function NavRail({ active, onChange }: NavRailProps) {
       {CATEGORY_ITEMS.map((item) => (
         <NavButton key={item.key} item={item} active={active} onChange={onChange} />
       ))}
+
+      <Separator className="my-2" />
+      <Link to="/drafts" className="w-full">
+        <Button variant="ghost" className="w-full justify-start gap-2 px-3">
+          Drafts
+        </Button>
+      </Link>
+      <Button variant="ghost" className="w-full justify-start gap-2 px-3" onClick={handleSignOut}>
+        Sign out
+      </Button>
     </nav>
   )
 }

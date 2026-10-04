@@ -6,4 +6,6 @@ export type Email = {
     subject: string;
     body: string;
     receivedAt: string;
+    /** Gmail label IDs, e.g. INBOX, CATEGORY_PROMOTIONS. */
+    labels?: string[];
 }

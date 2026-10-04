@@ -26,7 +26,7 @@ export async function listMessages(
     const response = (await gmail).users.messages.list({
         userId: "me",
         maxResults,
-        q: "in:inbox",
+        q: "in:inbox -category:promotions -category:social -category:updates",
       });
 
     return (await response).data.messages ?? [];
@@ -68,7 +68,7 @@ export async function listMessagePage(
         userId: "me",
         maxResults: options.maxResults ?? 100,
         pageToken: options.pageToken,
-        q: options.query ?? "in:inbox",
+        q: options.query ?? "in:inbox -category:promotions -category:social -category:updates",
     });
 
     const data = response.data ?? {};

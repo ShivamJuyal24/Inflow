@@ -38,6 +38,20 @@ function setupOwnedAccounts(userIds: string[]) {
 beforeEach(() => {
   vi.resetAllMocks();
 
+  // Default: the user has a connected Google account, and background
+  // enumeration finds no owned accounts (individual tests override).
+  const chain: any = {};
+  chain.select = vi.fn(() => chain);
+  chain.not = vi.fn(() => chain);
+  chain.eq = vi.fn(() => chain);
+  chain.limit = vi.fn(() => chain);
+  chain.maybeSingle = vi.fn(() =>
+    Promise.resolve({ data: { id: "account-1" }, error: null })
+  );
+  chain.then = (onFulfilled: any, onRejected: any) =>
+    Promise.resolve({ data: [], error: null }).then(onFulfilled, onRejected);
+  supabaseMock.from.mockReturnValue(chain);
+
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});

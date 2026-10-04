@@ -171,6 +171,12 @@ export const syncEmails = async (req: Request, res: Response) => {
       });
     }
 
+    if (error.message === "GMAIL_NOT_CONNECTED") {
+      return res.status(400).json({
+        message: "Connect a Gmail account before running triage.",
+      });
+    }
+
     console.error("Sync emails error:", error);
     return res.status(500).json({ message: "Failed to run triage" });
   }

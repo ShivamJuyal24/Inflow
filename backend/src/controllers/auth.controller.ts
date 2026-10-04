@@ -134,6 +134,33 @@ function logOAuthError(context: string, error: unknown) {
   });
 }
 
+export const googleStatus = async (req: Request, res: Response) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const { data, error } = await supabase
+      .from("google_accounts")
+      .select("email")
+      .eq("user_id", req.user.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Failed to check Google account status:", {
+        message: error.message,
+      });
+      return res.status(500).json({ message: "Failed to check Gmail status" });
+    }
+
+    return res.json({ connected: !!data, email: data?.email ?? null });
+  } catch (error) {
+    logOAuthError("Google status error", error);
+    return res.status(500).json({ message: "Failed to check Gmail status" });
+  }
+};
+
 export const googleAuth = async (req: Request, res: Response) => {
   try {
     if (!req.user?.id) {
@@ -162,7 +189,7 @@ export const googleAuth = async (req: Request, res: Response) => {
       state,
     });
 
-    return res.redirect(authUrl);
+    return res.json({ url: authUrl });
   } catch (error) {
     logOAuthError("Google OAuth initiation error", error);
 
@@ -326,11 +353,7 @@ export const googleCallback = async (
       });
     }
 
-    return res.json({
-      message: "Google OAuth successful",
-      email,
-      refreshTokenStored: true,
-    });
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard?gmail=connected`);
   } catch (error) {
     logOAuthError("Google OAuth error", error);
 

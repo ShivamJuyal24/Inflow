@@ -28,6 +28,13 @@ export async function runTriage(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    if (error.message === "GMAIL_NOT_CONNECTED") {
+      res.status(400).json({
+        message: "Connect a Gmail account before running triage.",
+      });
+      return;
+    }
+
     console.error("[Triage] Manual run failed:", error);
 
     res.status(500).json({

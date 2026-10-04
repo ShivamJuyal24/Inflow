@@ -158,6 +158,23 @@ export async function runInboxTriage(
 
   try {
     if (trigger === "manual") {
+      const { data: ownedAccount, error: ownershipError } = await supabase
+        .from("google_accounts")
+        .select("id")
+        .eq("user_id", userId!)
+        .limit(1)
+        .maybeSingle();
+
+      if (ownershipError) {
+        throw new Error(
+          `Failed to check Google account ownership: ${ownershipError.message}`
+        );
+      }
+
+      if (!ownedAccount) {
+        throw new Error("GMAIL_NOT_CONNECTED");
+      }
+
       const summary = await runForUser(trigger, userId!);
       return { summary };
     }

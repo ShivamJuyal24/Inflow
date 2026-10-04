@@ -1,4 +1,5 @@
 import type { Draft, DraftListResponse, DraftDetailResponse, DraftMutationResponse } from "../types/draft";
+import { apiFetch } from "./apiClient";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -14,10 +15,7 @@ export class DraftApiError extends Error {
 }
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const res = await apiFetch(url, options);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     throw new DraftApiError(
@@ -43,22 +41,22 @@ export async function updateDraft(emailId: string, body: string): Promise<Draft>
     method: "PATCH",
     body: JSON.stringify({ body }),
   });
-  return res.draft;
+  return res;
 }
 
 export async function approveDraft(emailId: string): Promise<Draft> {
   const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}/approve`, { method: "POST" });
-  return res.draft;
+  return res;
 }
 
 export async function rejectDraft(emailId: string): Promise<Draft> {
   const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}/reject`, { method: "POST" });
-  return res.draft;
+  return res;
 }
 
 export async function sendDraft(emailId: string): Promise<Draft> {
   const res = await fetchJson<DraftMutationResponse>(`${API_BASE}/drafts/${emailId}/send`, { method: "POST" });
-  return res.draft;
+  return res;
 }
 
 export type SendOutcome = "SENT" | "NOT_SENT";
@@ -72,5 +70,5 @@ export async function resolveSend(emailId: string, outcome: SendOutcome): Promis
     method: "POST",
     body: JSON.stringify({ outcome }),
   });
-  return res.draft;
+  return res;
 }

@@ -12,7 +12,7 @@
  * This prevents huge newsletters / HTML emails / tracking
  * links from consuming the Groq token limit.
  */
-const MAX_BODY_LENGTH = 5000;
+const MAX_BODY_LENGTH = 1200;
 
 /**
  * Clean an email body before sending it to the LLM.
@@ -49,11 +49,18 @@ export function cleanEmailBody(body: string): string {
 
   cleaned = cleaned.trim();
 
-  // Limit body size
+  // Limit body size: keep the head AND a slice of the tail. The opening of
+  // an email is usually the most informative (greeting + ask), but the
+  // decisive detail sometimes arrives later, so truncating to the first N
+  // characters alone can misclassify. Head + tail gives the LLM both ends
+  // at roughly the old token cost.
   if (cleaned.length > MAX_BODY_LENGTH) {
+    const headLength = Math.floor(MAX_BODY_LENGTH * 0.7);
+    const tailLength = MAX_BODY_LENGTH - headLength;
     cleaned =
-      cleaned.slice(0, MAX_BODY_LENGTH) +
-      "\n\n[Email body truncated for classification]";
+      cleaned.slice(0, headLength) +
+      "\n\n[...middle of email omitted for classification...]\n\n" +
+      cleaned.slice(cleaned.length - tailLength);
   }
 
   return cleaned;

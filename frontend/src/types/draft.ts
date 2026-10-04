@@ -22,14 +22,10 @@ export interface DraftListResponse {
   drafts: Draft[];
 }
 
-export interface DraftDetailResponse {
-  draft: Draft & { email: Email };
-}
+export type DraftDetailResponse = Draft & { email: Email };
 
-export interface DraftMutationResponse {
-  message: string;
-  draft: Draft;
-}
+/** Mutation endpoints (PATCH/approve/reject/send/resolve-send) return the draft itself. */
+export type DraftMutationResponse = Draft;
 
 export interface ApiError {
   error: string;

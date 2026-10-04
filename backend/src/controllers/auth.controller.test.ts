@@ -158,6 +158,7 @@ beforeEach(() => {
 
   process.env.SUPABASE_SECRET_KEY = "test-secret-key";
   process.env.NODE_ENV = "test";
+  process.env.FRONTEND_URL = "http://localhost:5173";
 });
 
 describe("googleAuth", () => {
@@ -213,10 +214,10 @@ describe("googleAuth", () => {
       }
     );
 
-    expect(res.redirect).toHaveBeenCalledTimes(1);
-    expect(res.redirect).toHaveBeenCalledWith(
-      "https://accounts.google.com/o/oauth2/auth"
-    );
+    expect(res.json).toHaveBeenCalledTimes(1);
+    expect(res.json).toHaveBeenCalledWith({
+      url: "https://accounts.google.com/o/oauth2/auth",
+    });
   });
 
   it("uses the authenticated user ID when generating OAuth state", async () => {
@@ -527,11 +528,9 @@ describe("googleCallback", () => {
       }
     );
 
-    expect(res.json).toHaveBeenCalledWith({
-      message: "Google OAuth successful",
-      email: "connected@gmail.com",
-      refreshTokenStored: true,
-    });
+    expect(res.redirect).toHaveBeenCalledWith(
+      "http://localhost:5173/dashboard?gmail=connected"
+    );
   });
 
   it("does not trust a client-provided user ID when saving the account", async () => {
@@ -639,11 +638,9 @@ describe("googleCallback", () => {
       }
     );
 
-    expect(res.json).toHaveBeenCalledWith({
-      message: "Google OAuth successful",
-      email: "connected@gmail.com",
-      refreshTokenStored: true,
-    });
+    expect(res.redirect).toHaveBeenCalledWith(
+      "http://localhost:5173/dashboard?gmail=connected"
+    );
   });
 
   it("rejects an existing Google account owned by another user without overwriting it", async () => {

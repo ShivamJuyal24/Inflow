@@ -48,7 +48,7 @@ describe("listMessagePage", () => {
       userId: "me",
       maxResults: 2,
       pageToken: "token-0",
-      q: "in:inbox",
+      q: "in:inbox -category:promotions -category:social -category:updates",
     });
   });
 

@@ -29,7 +29,7 @@ import {
  * This helps avoid rate-limit issues when processing
  * many emails.
  */
-const DELAY_BETWEEN_REQUESTS_MS = 1000;
+const DELAY_BETWEEN_REQUESTS_MS = 3000;
 
 /**
  * Supabase/PostgREST filters `.in()` values into the request URL, so a
@@ -475,29 +475,84 @@ export async function classifyNode(
     (email) => !existingMap.has(email.id)
   );
 
-  console.log(`Emails to classify via Jev: ${emailsToClassify.length}`);
+  // Emails Gmail already files under a low-value tab get a deterministic
+  // LOW_PRIORITY classification — no LLM call, no tokens spent.
+  const LOW_VALUE_GMAIL_LABELS = new Set([
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_FORUMS",
+  ]);
 
-  // Fail the run loudly on a configuration problem instead of letting every
-  // email fail individually, be skipped, and the run look "complete".
-  if (emailsToClassify.length > 0 && !process.env.JEVMODEL_API_KEY) {
-    throw new Error(
-      "Missing JEVMODEL_API_KEY environment variable — cannot classify emails"
-    );
-  }
+  const lowValueEmails = emailsToClassify.filter((email) =>
+    (email.labels ?? []).some((label) => LOW_VALUE_GMAIL_LABELS.has(label))
+  );
+
+  const llmEmails = emailsToClassify.filter(
+    (email) => !lowValueEmails.includes(email)
+  );
 
   const classifications: EmailClassification[] = Array.from(
     existingMap.values()
   );
 
-  // Emails that were attempted but did not end up classified AND persisted.
-  // Their `emails.category` stays NULL, so collectIdsNeedingWork picks them
-  // up again on the next run.
+  for (const email of lowValueEmails) {
+    const details = CATEGORY_DETAILS.LOW_PRIORITY;
+    const classification: EmailClassification = {
+      messageId: email.id,
+      category: "LOW_PRIORITY",
+      reason: `Filed under a low-value Gmail category (${(email.labels ?? [])
+        .find((label) => LOW_VALUE_GMAIL_LABELS.has(label))
+        ?.replace("CATEGORY_", "")
+        .toLowerCase()}).`,
+      suggested_action: details.suggested_action,
+    };
+
+    const { data: updatedRows, error: updateError } = await supabase
+      .from("emails")
+      .update({
+        category: classification.category,
+        classification_reason: classification.reason,
+        suggested_action: classification.suggested_action,
+        classified_at: new Date().toISOString(),
+      })
+      .eq("message_id", email.id)
+      .eq("google_account_id", state.googleAccountId)
+      .select("message_id");
+
+    if (updateError) {
+      throw new Error(
+        `Failed to persist classification: ${updateError.message}`
+      );
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new Error(
+        "Failed to persist classification: no matching email row was updated"
+      );
+    }
+
+    classifications.push(classification);
+    console.log(`Classified ${email.id} via Gmail labels: LOW_PRIORITY`);
+  }
+
+  const emailsNeedingJev = llmEmails;
+
+  console.log(`Emails to classify via Jev: ${emailsNeedingJev.length}`);
+
+  // Fail the run loudly on a configuration problem instead of letting every
+  // email fail individually, be skipped, and the run look "complete".
+  if (emailsNeedingJev.length > 0 && !process.env.JEVMODEL_API_KEY) {
+    throw new Error(
+      "Missing JEVMODEL_API_KEY environment variable — cannot classify emails"
+    );
+  }
+
   const failures: { messageId: string; reason: string }[] = [];
   let attempted = 0;
   let rateLimited = false;
 
-  for (let i = 0; i < emailsToClassify.length; i++) {
-    const email = emailsToClassify[i];
+  for (let i = 0; i < emailsNeedingJev.length; i++) {
+    const email = emailsNeedingJev[i];
     attempted += 1;
 
     console.log(`Classifying email: ${email.id}`);
@@ -572,24 +627,24 @@ export async function classifyNode(
       if (error?.status === 429) {
         console.warn(
           "Rate limit hit — stopping classification batch early. " +
-            `${emailsToClassify.length - attempted} emails were not attempted this run.`
+            `${emailsNeedingJev.length - attempted} emails were not attempted this run.`
         );
         rateLimited = true;
         break;
       }
     }
 
-    if (i < emailsToClassify.length - 1) {
+    if (i < emailsNeedingJev.length - 1) {
       await sleep(DELAY_BETWEEN_REQUESTS_MS);
     }
   }
 
-  const notAttempted = emailsToClassify.length - attempted;
+  const notAttempted = emailsNeedingJev.length - attempted;
   const classifiedNow =
-    emailsToClassify.length - failures.length - notAttempted;
+    emailsNeedingJev.length - failures.length - notAttempted;
 
   console.log(
-    `Classified ${classifiedNow}/${emailsToClassify.length} new emails ` +
+    `Classified ${classifiedNow}/${emailsNeedingJev.length} new emails ` +
       `(${existingMap.size} already classified, ${failures.length} failed, ` +
       `${notAttempted} not attempted${
         rateLimited ? " — batch stopped early due to rate limit" : ""
