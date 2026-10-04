@@ -1,269 +1,152 @@
 # AGENTS.md — Slashy / Inflow
 
-Persistent context for coding sessions. This document is based only on the current repository.
+Persistent context for coding sessions. This document reflects the current repository state.
 
-## Project state
+## What this is
 
-Inflow (`slashy`) is a single-user Gmail triage application. Google OAuth provides a stored refresh token; the LangGraph pipeline fetches inbox emails, persists them in Supabase, classifies them with Groq, derives actions, persists new action records, conditionally routes selected actions, and generates reply drafts for `DRAFT_REPLY` actions.
-
-The Express server provides health, OAuth, inbox, triage, and draft-review/send routes. `services/triage.service.ts` owns full graph invocation and is used by the startup job, scheduled auto-triage, and manual triage endpoints. `frontend/` provides an inbox dashboard with category filters, search, email detail, manual triage, and reply-draft review.
+Inflow (`slashy`) is a multi-user Gmail triage application. Users sign in with Supabase Auth, connect their Gmail mailbox via Google OAuth, and the system periodically fetches inbox emails, persists them in Supabase, classifies them (deterministic Gmail-label shortcuts first, then an LLM), derives durable actions, and generates reply drafts for `DRAFT_REPLY` actions. Drafts move through a human approval gate before anything is sent.
 
 ## Stack
 
 | Layer | Technology |
 |---|---|
-| Backend | Node.js, TypeScript, Express 5 |
-| Frontend | React 19, Vite 8, Tailwind CSS 4 |
-| Database | Supabase Postgres via `@supabase/supabase-js` |
-| Orchestration | LangGraph |
-| OAuth and email | Google OAuth 2.0 and Gmail API via `googleapis` |
-| LLM | Groq SDK, `llama-3.3-70b-versatile` |
+| Backend | Node.js, TypeScript (strict, `NodeNext` ESM imports with `.js` extensions), Express 5 |
+| Frontend | React 19, Vite 8, Tailwind CSS 4, react-router-dom 7 |
+| Database / Auth | Supabase Postgres via `@supabase/supabase-js`, Supabase Auth |
+| Orchestration | LangGraph (`@langchain/langgraph`) |
+| OAuth / Email | Google OAuth 2.0 and Gmail API via `googleapis` |
+| Classification | Jev API (`https://jevmodel.org/v1/systemone`, model `jev-latest`) |
+| Draft generation | Groq SDK, `openai/gpt-oss-120b`, temperature 0.3 |
 | Validation | Zod 4 |
+| Tests | Vitest (backend), Testing Library + jsdom (frontend devDeps) |
 
-Google OAuth requests `openid`, `email`, `profile`, `gmail.readonly`, `gmail.send`, and `calendar.readonly`. Gmail sending is limited to explicitly approved reply drafts; there is no Calendar implementation.
+Google OAuth scopes: `openid`, `email`, `profile`, `gmail.readonly`, `gmail.send`, `calendar.readonly`.
 
 ## Repository layout
 
 ```text
 slashy/
-├── AGENTS.md
-├── CLAUDE.md
-├── README.md
-├── package.json              # root stub; no useful scripts
+├── AGENTS.md / CLAUDE.md / README.md
 ├── backend/
-│   ├── .env                  # not committed; required locally
-│   ├── package.json
-│   ├── tsconfig.json
+│   ├── .env                  # not committed
+│   ├── .env.example          # committed template
 │   └── src/
-│       ├── server.ts
-│       ├── config/           # google, googleScopes, supabase, groq
-│       ├── controllers/      # auth.controller.ts
-│       ├── routes/           # auth.routes.ts
-│       ├── graph/
-│       │   ├── graph.ts
-│       │   ├── nodes.ts
-│       │   ├── state.ts
-│       │   ├── actionMapper.ts
-│       │   ├── testGraph.ts
-│       │   ├── testRouting.ts
-│       │   └── testDraft.ts
-│       ├── services/
-│       │   ├── gmail.service.ts
-│       │   ├── email.parser.ts
-│       │   └── testGmail.ts
-│       └── types/
-│           ├── email.ts
-│           ├── classification.ts
-│           ├── action.ts
-│           └── draft.ts
-└── frontend/                 # default Vite starter; not wired to backend
+│       ├── server.ts         # listen + startup/scheduled triage
+│       ├── app.ts            # express app, route mounting, /api/health
+│       ├── config/           # google, googleScopes, supabase, groq, gmailSync
+│       ├── controllers/      # auth, email, draft, triage
+│       ├── middleware/       # auth.middleware.ts (requireAuth)
+│       ├── routes/           # auth/email/draft/triage routers
+│       ├── graph/            # graph.ts, nodes.ts, state.ts, actionMapper.ts,
+│       │                     # jevClassifier.ts, testGraph.ts, testRouting.ts, testDraft.ts
+│       ├── services/         # gmail.service.ts, email.parser.ts, triage.service.ts,
+│       │                     # emailSync.service.ts (unused by scheduler)
+│       ├── test/             # shared test mocks (fakeSupabase, supabase, gmail)
+│       └── types/            # email, classification, action, draft, triage
+└── frontend/
+    └── src/
+        ├── main.tsx          # mounts <AuthProvider><App/></AuthProvider>
+        ├── App.tsx           # BrowserRouter + route table
+        ├── auth/             # AuthProvider.tsx (Supabase session)
+        ├── components/
+        │   ├── auth/         # ProtectedRoute.tsx
+        │   ├── layout/       # AppShell.tsx, NavRail.tsx
+        │   ├── ui/           # shadcn-style primitives
+        │   ├── ai/           # CommandSidebar.tsx
+        │   └── …             # DraftCard, DraftDetail, EmailDetail, InboxList, TriageRunButton
+        ├── lib/              # supabase.ts, apiClient.ts, emailApi.ts, draftApi.ts,
+        │                     # triageApi.ts, connectionApi.ts, utils.ts
+        ├── pages/            # Landing, Login, SignUp, Dashboard, Drafts
+        └── types/            # email, draft, triage
 ```
 
-## Current architecture
+## Authentication model (two separate layers)
+
+1. **App sign-in (Supabase Auth).** The frontend signs users in with email/password (`AuthProvider`), and every protected API call sends `Authorization: Bearer <supabase access_token>`, attached by `lib/apiClient.ts` (`apiFetch`). `middleware/auth.middleware.ts` (`requireAuth`) validates it via `supabase.auth.getUser` and sets `req.user.id`.
+2. **Gmail mailbox authorization (Google OAuth).** Separate flow: `GET /api/auth/google` (requires app sign-in) returns `{ url }` for the frontend to navigate to; the Google callback stores the refresh token in `google_accounts` (keyed by the account's email, upserted with `user_id` from the signed OAuth state) and redirects to `${FRONTEND_URL}/dashboard?gmail=connected`.
+
+Sign-in alone does **not** connect Gmail — the dashboard shows a "Connect Gmail" card until `GET /api/auth/google/status` reports `{ connected: true }`.
+
+## LangGraph pipeline
+
+`graph/graph.ts`:
 
 ```text
-Google OAuth → Express API → Supabase (google_accounts)
-                                   ↓
-                            LangGraph CLI
-                                   ↓
-fetch → persist emails → classify → map actions → persist actions → route
-                                   ↓
-              END / draftWorkFlow (reply drafts) / meetingWorkFlow (stub)
+START → fetch → persist → classify → action → routeActions
+  END | draftWorkFlow | meetingWorkFlow → END
 ```
 
-### LangGraph flow
+- **fetchNode** — loads the user's Google account (scoped by `state.userId`), pages Gmail via `getGmailSyncConfig()`, parses messages with `parseGmailMessage` (body prefers `text/plain`, falls back to stripped HTML; also captures `labelIds` into `Email.labels`).
+- **persistNode** — upserts new emails into `emails` (dedup by `message_id`).
+- **classifyNode** — see below.
+- **actionNode** — maps categories to action types via `actionMapper.ts`, inserts new `email_actions` rows idempotently on `(message_id, action_type)`.
+- **routeActions** — any `DRAFT_REPLY` → `draftWorkFlow`; any `ANALYZE_MEETING` → `meetingWorkFlow` (stub); both → both; else END.
+- **draftNode** — for `DRAFT_REPLY` actions without an existing draft, generates a Groq reply (`llama`-class model `openai/gpt-oss-120b`, temp 0.3, up to 8000 body chars), stores a `PENDING_REVIEW` draft, and marks the action `COMPLETED`.
 
-`backend/src/graph/graph.ts` defines:
+Classifications persist to `emails.category` / `classification_reason` / `suggested_action` / `classified_at`. Emails with a non-null `category` are skipped on later runs (`existingMap` in classifyNode), so reruns only process new or previously failed emails.
+
+### Classification cost controls (current)
+
+- **Deterministic label shortcut:** emails labeled `CATEGORY_PROMOTIONS`, `CATEGORY_SOCIAL`, or `CATEGORY_FORUMS` are persisted as `LOW_PRIORITY` immediately — no LLM call. `CATEGORY_UPDATES` and `CATEGORY_PRIMARY` still go through the LLM (Updates can carry receipts/security mail).
+- **Fetch query:** `in:inbox -category:promotions -category:social -category:updates`.
+- **Body sampling:** `jevClassifier.cleanEmailBody` strips URLs/whitespace and keeps head (~70%) + tail (~30%) of at most 1200 chars.
+- **Batch caps:** `GMAIL_PAGE_SIZE` (default 100, max 500), `GMAIL_MAX_MESSAGES` (local `.env` set to 10), `GMAIL_MAX_SCAN` (local `.env` set to 200).
+- **Pacing:** 3000 ms between classification and draft provider calls; 429 stops the batch early and leaves the rest for the next run.
+
+## State and contracts
+
+`EmailTriageState`: `userId`, `googleAccountId`, `accountEmail`, `emails`, `classification`, `actions`, `drafts`, `calendarSlots`, `approvalStatus`. Array reducers replace (`(_, next) => next`), never append.
+
+`Email` (`types/email.ts`): `id`, `threadId`, `from`, `to`, `subject`, `body`, `receivedAt`, `labels?`.
+
+Categories: `SPAM`, `LOW_PRIORITY`, `INFORMATIONAL`, `REQUIRES_REPLY`, `MEETING`, `IMPORTANT`.
+Actions: `STORE` | `REVIEW` | `DRAFT_REPLY` | `ANALYZE_MEETING`; statuses `PENDING` | `COMPLETED` | `FAILED`.
+Draft statuses: `PENDING_REVIEW` | `APPROVED` | `REJECTED` | `SENDING` | `SEND_UNCERTAIN` | `SENT`.
+
+## Supabase tables (inferred from queries)
+
+- `google_accounts` — `id`, `email`, `user_id`, `refresh_token`, `created_at`, `updated_at`
+- `emails` — `id` (uuid), `message_id`, `thread_id`, `account_email`, `google_account_id`, `from_email`, `to_email`, `subject`, `body`, `received_at`, `category`, `classification_reason`, `suggested_action`, `classified_at`
+- `email_actions` — `message_id`, `action_type`, `status`
+- `drafts` — `id`, `email_id`, `body`, `status`, timestamps
+
+## HTTP API
+
+All routes below are behind `requireAuth` unless noted.
+
+- `GET /api/health` (open)
+- `GET /api/auth/google` → `{ url }`
+- `GET /api/auth/google/callback` (open; validated via signed OAuth state + nonce cookie)
+- `GET /api/auth/google/status` → `{ connected, email }`
+- `GET /api/emails` (`page`, `limit`, `category`, `q`), `GET /api/emails/:id`, `POST /api/emails/sync`
+- `POST /api/triage/run` → 409 if already running, 400 if no Gmail account connected
+- `GET /api/drafts`, `GET /api/drafts/:emailId`, `PATCH /api/drafts/:emailId`, `POST .../approve|reject|send|resolve-send`
+
+Draft send rules: only `APPROVED` → `SENT` (status `SENDING` claimed first; `SEND_UNCERTAIN` + `resolve-send` reconciles timeouts); PATCH allowed only while `PENDING_REVIEW`; transitions to wrong states return 409.
+
+## Environment variables
+
+Backend (`backend/.env`, see `.env.example`):
 
 ```text
-START → fetch → persist → classify → action
-action → END | draftWorkFlow | meetingWorkFlow
-draftWorkFlow → END
-meetingWorkFlow → END
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
+SUPABASE_URL, SUPABASE_SECRET_KEY, GROQ_API_KEY, JEVMODEL_API_KEY
+PORT (default 5000), FRONTEND_URL, SYNC_INTERVAL_MS (default 300000)
+GMAIL_PAGE_SIZE, GMAIL_MAX_MESSAGES, GMAIL_MAX_SCAN
 ```
 
-- `actionNode` maps classifications to actions via `actionMapper.ts` and persists new rows to `email_actions`.
-- `routeActions` is the conditional router attached after `action`.
-- `draftNode` (`draftWorkFlow`) generates Groq reply drafts, persists them to `drafts`, and marks `DRAFT_REPLY` actions `COMPLETED`.
-- `meetingNode` (`meetingWorkFlow`) is connected but remains a stub: it logs and returns an empty partial state.
+Frontend (`frontend/.env`, see `.env.example`): `VITE_API_URL` (`/api` via Vite proxy locally), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
 
-There is no `routeNode`; routing is handled by the `routeActions` function.
+## Frontend behavior
 
-### Graph state
+- `/` Landing (public), `/login` + `/signup` (redirect to `/dashboard` when signed in), `/dashboard` + `/drafts` (protected), `*` → `/`.
+- Dashboard: inbox list with category filters, search, pagination; Gmail connection card when `connected === false`; triage button only when connected; email detail or DraftDetail for selection; `?gmail=connected` banner.
+- Drafts: list + detail view with edit (while PENDING_REVIEW), approve/reject/send/resolve-send.
+- NavRail: category filters plus "Drafts" link and "Sign out".
 
-`EmailTriageState` contains:
+## Scripts and verification
 
-- `emails: Email[]`
-- `classification: EmailClassification[]`
-- `actions: EmailAction[]`
-- `drafts: EmailDraft[]`
-- `calendarSlots: string[]`
-- `approvalStatus: string | null`
+Backend (`backend/`): `npm run dev`, `npm run build` (tsc → dist), `npm run start`, `npm test` / `test:watch` (Vitest), `npm run graph|gmail|draft` (live scripts, need real credentials).
+Frontend (`frontend/`): `npm run dev`, `npm run build` (`tsc -b && vite build`), `npm run lint`, `npm test` if configured.
 
-`calendarSlots` and `approvalStatus` are currently unused by implemented node logic.
-
-State reducers replace arrays entirely (`(_, next) => next`), not append.
-
-## Pipeline responsibilities and design decisions
-
-- Gmail API access stays in `services/gmail.service.ts`; message parsing stays in `services/email.parser.ts`; classification-to-action mapping stays in `graph/actionMapper.ts`; graph orchestration stays in `graph/`; shared contracts stay in `types/`.
-- `fetchNode` reads the first `google_accounts` row (`.limit(1).single()`), which is a single-account assumption. It fetches up to 10 messages matching `in:inbox`, fetches their full payloads, and parses them into the application `Email` model. (The inline comment in `nodes.ts` still says "20 recent unread" — the code passes `10` and the query is `in:inbox`, not `is:unread`.)
-- The parser prefers plain-text MIME parts, falls back to stripped HTML, and produces ISO timestamps. Parsed full bodies are retained. `email.parser.ts` also exports `cleanBodyForClassification` (2000-char cap); `classifyNode` uses its own `cleanEmailBody` helper (5000-char cap) instead.
-- `persistNode` runs before classification. It reads existing `emails.message_id` values and inserts only unseen emails. `account_email` is set to `email.to` (the recipient header), not the connected Google account email from `google_accounts`.
-- `classifyNode` classifies every email in `state.emails` for the current run; it does not skip emails that were classified in a prior run. Classifications are not persisted to Supabase.
-- `classifyNode` uses Groq with `llama-3.3-70b-versatile`, temperature 0, JSON-object output, and Zod validation. It removes URLs/extra whitespace and limits LLM input to 5,000 body characters; the stored body is not truncated.
-- Classification is sequential with a one-second delay. Individual failures are logged and skipped; a Groq 429 stops the remainder of the batch and returns partial classifications.
-- The application owns classification `messageId`: the LLM must not provide it, and the node attaches the Gmail ID only after validating model-generated fields.
-
-### Triage execution
-
-- `services/triage.service.ts` owns the reusable `runInboxTriage` operation. It invokes the compiled graph with an empty `EmailTriageState`, builds a `TriageSummary`, and prevents overlapping startup, scheduled, and manual runs with an in-memory guard.
-- `server.ts` runs full triage once at startup and then every `SYNC_INTERVAL_MS` (five minutes by default). The scheduled job no longer calls the ingestion-only `syncRecentEmails` service.
-- `POST /api/triage/run` and the legacy `POST /api/emails/sync` endpoint both invoke the full triage pipeline. A concurrent run receives HTTP 409 from the manual endpoints.
-- The existing `emailSync.service.ts` remains in the repository but is not used by the server scheduler. Do not reintroduce it into the scheduled path without a clear reason; it persists emails only and bypasses classification, action creation, and drafting.
-
-## Classification and action lifecycle
-
-Classification categories are `SPAM`, `LOW_PRIORITY`, `INFORMATIONAL`, `REQUIRES_REPLY`, `MEETING`, and `IMPORTANT`.
-
-`graph/actionMapper.ts` maps them as follows:
-
-| Classification | Action type | Initial status |
-|---|---|---|
-| `SPAM`, `LOW_PRIORITY`, `INFORMATIONAL` | `STORE` | `COMPLETED` |
-| `IMPORTANT` | `REVIEW` | `PENDING` |
-| `REQUIRES_REPLY` | `DRAFT_REPLY` | `PENDING` |
-| `MEETING` | `ANALYZE_MEETING` | `PENDING` |
-
-The complete action status vocabulary is `PENDING`, `COMPLETED`, and `FAILED`. `STORE` is `COMPLETED` because the email has already been persisted by `persistNode`; the action node does not itself transition existing actions.
-
-Action types are defined in `types/action.ts` as `STORE`, `REVIEW`, `DRAFT_REPLY`, and `ANALYZE_MEETING`.
-
-### `email_actions` persistence and idempotency
-
-`actionNode` derives one action per classification, then queries `email_actions` for existing `(message_id, action_type)` pairs. It inserts only newly derived pairs and also de-duplicates identical pairs within the same invocation.
-
-This makes action creation idempotent on `(message_id, action_type)`. Existing rows are skipped rather than updated. If checking or inserting actions fails, the node throws.
-
-### Routing
-
-`routeActions` examines `state.actions` after the action node:
-
-- Any `DRAFT_REPLY` action routes to `draftWorkFlow`.
-- Any `ANALYZE_MEETING` action routes to `meetingWorkFlow`.
-- A batch containing both types routes to both destinations.
-- If neither type appears, routing returns `END`.
-- `STORE` and `REVIEW` have no downstream workflow yet.
-
-### Reply draft workflow (`draftNode`)
-
-When routed to `draftWorkFlow`, `draftNode`:
-
-1. Filters `state.actions` for `DRAFT_REPLY`.
-2. Looks up Supabase `emails.id` (UUID) for each Gmail `message_id`.
-3. Skips emails that already have a row in `drafts` (by `email_id`); those are treated as already completed.
-4. For remaining actions, finds the matching email in `state.emails`. If the email body is not in state, logs a warning and skips (draft generation requires the email content in graph state).
-5. Calls Groq (`llama-3.3-70b-versatile`, temperature 0.3) with up to 8,000 characters of the original body. No JSON response format; free-text reply body.
-6. Builds `EmailDraft` objects with status `PENDING_REVIEW`.
-7. Upserts new drafts into `drafts` on `email_id` (`ignoreDuplicates: true`; relies on a unique constraint on `drafts.email_id`).
-8. Updates matching `email_actions` rows (`action_type = DRAFT_REPLY`) to `COMPLETED` in Supabase and in returned state.
-
-Draft status vocabulary (`types/draft.ts`): `PENDING_REVIEW`, `APPROVED`, `REJECTED`, `SENT`. Only `PENDING_REVIEW` is written by the current node.
-
-Individual draft failures are logged and skipped; a Groq 429 stops the remainder of the batch. Sequential processing uses the same one-second delay as classification.
-
-## Supabase tables used
-
-Table details are inferred from repository queries:
-
-| Table | Fields used / purpose |
-|---|---|
-| `google_accounts` | `email`, `refresh_token`, `created_at`, `updated_at`; stores OAuth accounts. |
-| `emails` | `id` (UUID PK), `message_id`, `thread_id`, `account_email`, `from_email`, `to_email`, `subject`, `body`, `received_at`, `category`, `classification_reason`, `suggested_action`, `classified_at`; stores fetched messages and persisted classifications. |
-| `email_actions` | `message_id`, `action_type`, `status`; stores durable derived actions. |
-| `drafts` | `email_id` (FK to `emails.id`, unique), `body`, `status`; stores generated reply drafts. |
-
-The backend uses `SUPABASE_SECRET_KEY` for server-side Supabase operations. Do not expose it to the frontend or commit credentials. Refresh tokens are stored in plaintext.
-
-## HTTP endpoints and environment
-
-Implemented endpoints:
-
-- `GET /api/health`
-- `GET /api/auth/google`
-- `GET /api/auth/google/callback`
-- `GET /api/auth/google/test-refresh` — uses a hard-coded development email (`shivamjuyal.dev@gmail.com`).
-- `GET /api/drafts`
-- `GET /api/drafts/:emailId`
-- `POST /api/drafts/:emailId/approve`
-- `POST /api/drafts/:emailId/reject`
-- `POST /api/drafts/:emailId/send`
-- `GET /api/emails` — supports `page`, `limit`, `category`, and `q` filters.
-- `GET /api/emails/:id`
-- `POST /api/emails/sync` — runs the full triage pipeline.
-- `POST /api/triage/run` — runs the full triage pipeline.
-
-`backend/.env` requires `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `GROQ_API_KEY`; `PORT` is optional and defaults to 5000. There is no committed `.env.example`.
-
-## Development and verification
-
-From `backend/`:
-
-```bash
-npm run dev       # Express on http://localhost:5000
-npm run build     # tsc → dist/
-npm run start     # node dist/server.js
-npm run graph     # tsx src/graph/testGraph.ts
-npm run gmail     # tsx src/services/testGmail.ts — full live pipeline
-npm run draft     # tsx src/graph/testDraft.ts — draftNode in isolation
-```
-
-Manual scripts without package scripts:
-
-- `graph/testRouting.ts` — calls `routeActions` directly with fixture actions.
-
-Script behavior:
-
-- `testGmail.ts` invokes the full compiled graph with empty initial state against live Gmail/Supabase/Groq.
-- `testGraph.ts` invokes the full compiled graph but pre-seeds `classification` and `actions`; because reducers replace arrays, those pre-seeded values are overwritten once `fetch`, `classify`, and `action` run on live data.
-- `testDraft.ts` loads one persisted email from Supabase and calls `draftNode` directly with synthetic classification/action state.
-
-There is no automated test framework or committed `*.test.*`/`*.spec.*` suite. Running the graph/Gmail/draft scripts requires configured credentials and live Supabase/Groq access, and can write email, action, and draft data to Supabase.
-
-Root `package.json` has no dev orchestration scripts.
-
-From `frontend/`:
-
-```bash
-npm run dev       # Vite development server; /api proxies to Express on port 5000
-npm run build     # TypeScript and production Vite build
-npm run lint      # ESLint
-```
-
-The frontend production build succeeds. The current lint run reports React Fast Refresh export warnings in several component/UI files and `react-hooks/set-state-in-effect` errors in `pages/Dashboard.tsx`.
-
-## Conventions to preserve
-
-- Use strict TypeScript with `NodeNext` module resolution and output to `backend/dist`.
-- Keep integrations, parsing, orchestration, and shared contracts separated as described above.
-- Export graph nodes as async functions returning `Partial<EmailTriageState>`.
-- Validate LLM-owned fields with Zod and keep application-owned IDs outside LLM control.
-- Preserve persist-before-classify sequencing and action idempotency by `(message_id, action_type)`.
-- Preserve draft idempotency by `drafts.email_id` and existing-draft skip logic in `draftNode`.
-- Preserve the approval gate: only `APPROVED` drafts may be sent through Gmail.
-- Keep route/controller import extensions consistent with existing NodeNext `.js` imports.
-- Do not modify `.env` or commit secrets.
-
-## Current limitations
-
-- The draft workflow supports `PENDING_REVIEW → APPROVED → SENT` and `PENDING_REVIEW → REJECTED`. The frontend exposes review, approval, rejection, and sending; the backend rejects sends unless the draft is `APPROVED`.
-- `meetingWorkFlow` does not analyze meetings, read Calendar, find slots, or create Calendar events.
-- No notification, WhatsApp, or Calendar workflow exists.
-- `STORE` and `REVIEW` do not have downstream handling.
-- Classifications are persisted on `emails` and already-classified emails are skipped on later graph runs.
-- `draftNode` requires the email body in `state.emails`; it does not re-fetch from Supabase if missing from state.
-- Duplicate body-cleaning logic exists in `nodes.ts` and `email.parser.ts`.
-- The frontend dashboard lists emails, supports category filters and sender/subject search, shows the stored classification reason and suggested action, and exposes manual triage. It loads a related draft when one exists and retains the approval/send gate. `NEEDS_ATTENTION` is currently filtered client-side after a paginated email response, so qualifying emails on later pages may not appear in that view.
-- The graph is exposed through `POST /api/triage/run`; there is no endpoint for individual graph nodes.
-- OAuth lacks CSRF `state` parameter; CORS is fully open; refresh tokens are not encrypted at rest.
-- No committed database migration files; schema exists only in Supabase.
+Conventions: create controllers/routes against `requireAuth`; scope every query by `req.user.id` → `google_account_id`; keep `.env` out of Git; smallest consistent diffs; report real command output.
