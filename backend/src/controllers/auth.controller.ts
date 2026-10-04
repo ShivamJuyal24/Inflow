@@ -121,6 +121,19 @@ function getOAuthCookieOptions() {
   };
 }
 
+function logOAuthError(context: string, error: unknown) {
+  if (error instanceof Error) {
+    console.error(context, {
+      name: error.name,
+    });
+    return;
+  }
+
+  console.error(context, {
+    type: typeof error,
+  });
+}
+
 export const googleAuth = async (req: Request, res: Response) => {
   try {
     if (!req.user?.id) {
@@ -151,7 +164,7 @@ export const googleAuth = async (req: Request, res: Response) => {
 
     return res.redirect(authUrl);
   } catch (error) {
-    console.error("Google OAuth initiation error:", error);
+    logOAuthError("Google OAuth initiation error", error);
 
     return res.status(500).json({
       message: "Failed to start Google OAuth",
@@ -235,9 +248,9 @@ export const googleCallback = async (
     );
 
     if (!response.ok) {
-      const errorData = await response.text();
-
-      console.error("Google userinfo error:", errorData);
+      console.error("Google userinfo request failed:", {
+        status: response.status,
+      });
 
       return res.status(500).json({
         message: "Failed to fetch Google user info",
@@ -272,10 +285,9 @@ export const googleCallback = async (
         .maybeSingle();
 
     if (ownershipLookupError) {
-      console.error(
-        "Supabase ownership lookup error:",
-        ownershipLookupError
-      );
+      console.error("Supabase ownership lookup error:", {
+        message: ownershipLookupError.message,
+      });
 
       return res.status(500).json({
         message: "Failed to verify Google account ownership",
@@ -305,7 +317,9 @@ export const googleCallback = async (
       );
 
     if (error) {
-      console.error("Supabase error:", error);
+      console.error("Supabase account upsert error:", {
+        message: error.message,
+      });
 
       return res.status(500).json({
         message: "Failed to save Google account",
@@ -318,7 +332,7 @@ export const googleCallback = async (
       refreshTokenStored: true,
     });
   } catch (error) {
-    console.error("Google OAuth error:", error);
+    logOAuthError("Google OAuth error", error);
 
     return res.status(500).json({
       message: "OAuth failed",
