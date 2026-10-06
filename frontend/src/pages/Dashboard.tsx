@@ -18,7 +18,7 @@ import {
   resolveSend,
   DraftApiError,
 } from "@/lib/draftApi"
-import type { InboxEmail, Email, EmailCategory } from "@/types/email"
+import type { InboxEmail, Email, EmailFilter } from "@/types/email"
 import type { Draft } from "@/types/draft"
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -66,7 +66,9 @@ export default function Dashboard() {
       setLoading(true)
       setError(null)
       const singleCategory =
-        activeCategory !== "ALL" ? (activeCategory as EmailCategory) : undefined
+        activeCategory !== "ALL"
+          ? (activeCategory as EmailFilter)
+          : undefined
       const data = await listEmails({ page, limit: 20, category: singleCategory, query })
 
       setEmails(data.emails)

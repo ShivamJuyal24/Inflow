@@ -10,10 +10,12 @@ import {
   Info,
   ArrowDownCircle,
   ShieldAlert,
+  AlertCircle,
 } from "lucide-react"
 
 export type NavCategory =
   | "ALL"
+  | "NEEDS_ATTENTION"
   | "IMPORTANT"
   | "REQUIRES_REPLY"
   | "MEETING"
@@ -29,6 +31,7 @@ interface NavRailProps {
 // 🎨 Icon color mapping – export so other components can use it
 export const ICON_COLORS: Record<NavCategory, string> = {
   ALL: "text-primary",
+  NEEDS_ATTENTION: "text-orange-500",
   IMPORTANT: "text-red-500",
   REQUIRES_REPLY: "text-amber-500",
   MEETING: "text-violet-500",
@@ -40,6 +43,7 @@ export const ICON_COLORS: Record<NavCategory, string> = {
 // 📛 Optional: category labels for reuse
 export const CATEGORY_LABELS: Record<NavCategory, string> = {
   ALL: "Inbox",
+  NEEDS_ATTENTION: "Needs attention",
   IMPORTANT: "Important",
   REQUIRES_REPLY: "Reply needed",
   MEETING: "Meetings",
@@ -53,6 +57,7 @@ const NAV_ITEMS = [
 ] as const
 
 const CATEGORY_ITEMS: { key: NavCategory; label: string; icon: React.ElementType }[] = [
+  { key: "NEEDS_ATTENTION", label: "Needs attention", icon: AlertCircle },
   { key: "IMPORTANT", label: "Important", icon: Star },
   { key: "REQUIRES_REPLY", label: "Reply needed", icon: Reply },
   { key: "MEETING", label: "Meetings", icon: Calendar },

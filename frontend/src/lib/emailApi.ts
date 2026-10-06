@@ -1,4 +1,4 @@
-import type { EmailListResponse, EmailDetailResponse, EmailCategory } from "../types/email";
+import type { EmailListResponse, EmailDetailResponse, EmailFilter } from "../types/email";
 import { apiFetch } from "./apiClient";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -15,7 +15,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 interface ListEmailsParams {
   page?: number;
   limit?: number;
-  category?: EmailCategory;
+  category?: EmailFilter;
   query?: string;
 }
 
