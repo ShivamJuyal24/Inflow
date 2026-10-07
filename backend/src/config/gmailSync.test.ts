@@ -14,6 +14,7 @@ describe("getGmailSyncConfig", () => {
   it("falls back to defaults when the env vars are unset or blank", () => {
     vi.stubEnv("GMAIL_PAGE_SIZE", "");
     vi.stubEnv("GMAIL_MAX_MESSAGES", "");
+    vi.stubEnv("GMAIL_MAX_SCAN", "");
 
     expect(getGmailSyncConfig()).toEqual({
       pageSize: DEFAULT_GMAIL_PAGE_SIZE,
@@ -25,6 +26,7 @@ describe("getGmailSyncConfig", () => {
   it("reads configured values", () => {
     vi.stubEnv("GMAIL_PAGE_SIZE", "250");
     vi.stubEnv("GMAIL_MAX_MESSAGES", "300");
+    vi.stubEnv("GMAIL_MAX_SCAN", "");
 
     expect(getGmailSyncConfig()).toEqual({
       pageSize: 250,

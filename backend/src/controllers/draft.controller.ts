@@ -7,7 +7,7 @@ import type { DraftStatus } from "../types/draft.js";
 type DraftRequest = Request<{ emailId: string }>;
 
 const DRAFT_COLUMNS =
-  "id, email_id, body, status, created_at, updated_at";
+  "id, email_id, body, status, created_at, updated_at, sent_at, followed_up_at, follow_up_count, kind";
 
 const EMAIL_COLUMNS =
   "id, google_account_id, thread_id, message_id, from_email, to_email, subject, body, received_at";
@@ -113,15 +113,36 @@ async function getOwnedDraft(
     return null;
   }
 
-  const { data: draft, error } = await supabase
+  const { data: draftsForEmail, error } = await supabase
     .from("drafts")
     .select(DRAFT_COLUMNS)
-    .eq("email_id", emailId)
-    .maybeSingle();
+    .eq("email_id", emailId);
 
   if (error) {
     throw new Error(`Failed to resolve draft: ${error.message}`);
   }
+
+  const rows = (draftsForEmail ?? []) as Record<string, any>[];
+  // An email can have both a SENT 'reply' draft and a PENDING_REVIEW
+  // 'follow_up' draft. The detail/edit/send endpoints should operate on
+  // the one that still needs a human decision.
+  const ACTIVE_FIRST = [
+    "PENDING_REVIEW",
+    "APPROVED",
+    "SENDING",
+    "SEND_UNCERTAIN",
+    "REJECTED",
+  ];
+  const draft =
+    rows.sort(
+      (a, b) =>
+        (ACTIVE_FIRST.indexOf(a.status) === -1
+          ? ACTIVE_FIRST.length
+          : ACTIVE_FIRST.indexOf(a.status)) -
+        (ACTIVE_FIRST.indexOf(b.status) === -1
+          ? ACTIVE_FIRST.length
+          : ACTIVE_FIRST.indexOf(b.status))
+    )[0] ?? null;
 
   return draft ? { draft, email } : null;
 }
@@ -134,6 +155,7 @@ async function transitionDraft(
   options: {
     allowStaleSending?: boolean;
     staleBefore?: string;
+    extra?: Record<string, unknown>;
   } = {}
 ): Promise<{
   data: Record<string, any> | null;
@@ -153,6 +175,7 @@ async function transitionDraft(
     .update({
       status: to,
       updated_at: new Date().toISOString(),
+      ...options.extra,
     })
     .eq("email_id", emailId)
     .eq("status", from);
@@ -553,7 +576,8 @@ export async function sendDraft(
         emailId,
         userId,
         "SENDING",
-        "SENT"
+        "SENT",
+        { extra: { sent_at: new Date().toISOString() } }
       );
     } catch (finalizeError) {
       console.error(
@@ -627,7 +651,8 @@ export async function resolveSend(
         emailId,
         userId,
         "SEND_UNCERTAIN",
-        "SENT"
+        "SENT",
+        { extra: { sent_at: new Date().toISOString() } }
       );
 
       if (!result.data) {

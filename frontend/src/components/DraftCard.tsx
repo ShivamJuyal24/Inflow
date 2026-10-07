@@ -45,14 +45,21 @@ export default function DraftCard({
             {draft.email?.from_email || "Unknown sender"} - {receivedDate}
           </p>
         </div>
-        <span
-          className={[
-            "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium capitalize",
-            statusStyles[draft.status] || "bg-gray-100 text-gray-800",
-          ].join(" ")}
-        >
-          {draft.status}
-        </span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {draft.kind === "follow_up" && (
+            <span className="rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-800">
+              Follow-up
+            </span>
+          )}
+          <span
+            className={[
+              "rounded-full px-2 py-0.5 text-xs font-medium capitalize",
+              statusStyles[draft.status] || "bg-gray-100 text-gray-800",
+            ].join(" ")}
+          >
+            {draft.status}
+          </span>
+        </div>
       </div>
       <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-gray-700">
         {draft.body}

@@ -124,6 +124,12 @@ export default function DraftDetail({
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">
           Proposed Reply
         </h3>
+        {draft.kind === "follow_up" && (
+          <p className="mb-3 rounded-md bg-purple-50 px-3 py-2 text-xs font-medium text-purple-800">
+            Follow-up draft — our original reply was sent, but no response
+            arrived within 3 days.
+          </p>
+        )}
         {canEdit ? (
           <>
             <textarea

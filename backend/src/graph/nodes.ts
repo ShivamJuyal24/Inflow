@@ -1055,19 +1055,20 @@ Draft the reply:
     }
   }
 
-  // 3. The existing unique constraint on drafts.email_id makes this safe
-  // when concurrent graph runs both generate a draft for the same email.
+  // (email_id, kind) is unique; a reply draft and a follow_up draft can
+  // coexist for one email. Prefer the actionable one for this emailId.
   if (drafts.length > 0) {
     const draftRows = drafts.map((draft) => ({
       email_id: messageIdToEmailId.get(draft.messageId),
       body: draft.draftBody,
       status: draft.status,
+      kind: "reply",
     }));
 
     const { error: upsertError } = await supabase
       .from("drafts")
       .upsert(draftRows, {
-        onConflict: "email_id",
+        onConflict: "email_id,kind",
         ignoreDuplicates: true,
       });
 

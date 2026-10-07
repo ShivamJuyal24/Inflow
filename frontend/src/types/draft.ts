@@ -15,6 +15,10 @@ export interface Draft {
   body: string;
   created_at: string;
   updated_at: string;
+  kind?: "reply" | "follow_up";
+  sent_at?: string | null;
+  followed_up_at?: string | null;
+  follow_up_count?: number;
   email?: Email;
 }
 

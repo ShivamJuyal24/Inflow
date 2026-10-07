@@ -153,10 +153,11 @@ describe("draftNode", () => {
           email_id: "uuid-1",
           body: "Hi, thanks for your email. Regards,",
           status: "PENDING_REVIEW",
+          kind: "reply",
         },
       ],
       {
-        onConflict: "email_id",
+        onConflict: "email_id,kind",
         ignoreDuplicates: true,
       }
     );
