@@ -71,7 +71,11 @@ export const listEmails = async (req: Request, res: Response) => {
       .order("received_at", { ascending: false })
       .range(from, to);
 
-    if (category === "NEEDS_ATTENTION") {
+    if (category === "ACTIONABLE") {
+      query = query.or(
+        "category.in.(IMPORTANT,REQUIRES_REPLY,INFORMATIONAL,MEETING),category.is.null"
+      );
+    } else if (category === "NEEDS_ATTENTION") {
       query = query.in("category", [
         "IMPORTANT",
         "REQUIRES_REPLY",

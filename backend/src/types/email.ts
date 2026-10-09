@@ -8,4 +8,8 @@ export type Email = {
     receivedAt: string;
     /** Gmail label IDs, e.g. INBOX, CATEGORY_PROMOTIONS. */
     labels?: string[];
-}
+    /** Headers used for deterministic classification */
+    listUnsubscribe?: string;
+    precedence?: string;
+    autoSubmitted?: string;
+};

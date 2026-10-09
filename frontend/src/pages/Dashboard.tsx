@@ -42,7 +42,7 @@ async function startGmailConnect(): Promise<void> {
 export default function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const [activeCategory, setActiveCategory] = useState<NavCategory>("ALL")
+  const [activeCategory, setActiveCategory] = useState<NavCategory>("ACTIONABLE");
   const [emails, setEmails] = useState<InboxEmail[]>([])
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)

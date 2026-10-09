@@ -6,7 +6,7 @@ export type EmailCategory =
   | "MEETING"
   | "IMPORTANT";
 
-export type EmailFilter = EmailCategory | "NEEDS_ATTENTION";
+export type EmailFilter = EmailCategory | "NEEDS_ATTENTION" | "ACTIONABLE";
 
 export type InboxEmail = {
   id: string;

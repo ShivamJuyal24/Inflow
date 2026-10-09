@@ -23,6 +23,13 @@ import {
   classifyWithJev,
   cleanEmailBody,
 } from "./jevClassifier";
+import {
+  resetCircuitBreakers,
+  classifyWithFallback,
+  persistClassification,
+  getClassifierOrder,
+} from "./classifier";
+import { classifyByHeaders } from "../services/email.parser";
 
 /**
  * Small delay between classification requests.
@@ -444,23 +451,28 @@ export async function classifyNode(
 
   const messageIds = state.emails.map((e) => e.id);
 
-  /* ── 1. Load existing classifications from Supabase ── */
+  /* ── 1. Load existing classifications from Supabase ──
+     Select emails that are already classified OR have a permanent failure
+     (so we don't retry failed ones). Only pending emails get re-processed. */
   const existingRows: {
     message_id: string;
     category: EmailClassification["category"];
     classification_reason: string;
     suggested_action: string;
+    classification_status: string;
+    classification_error: string | null;
+    classifier_model: string | null;
   }[] = [];
 
   for (const chunk of chunkArray(messageIds, IN_CLAUSE_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from("emails")
       .select(
-        "message_id, category, classification_reason, suggested_action, classified_at"
+        "message_id, category, classification_reason, suggested_action, classified_at, classification_status, classification_error, classifier_model"
       )
       .in("message_id", chunk)
       .eq("google_account_id", state.googleAccountId)
-      .not("category", "is", null);
+      .in("classification_status", ["classified", "failed"]);
 
     if (error) {
       throw new Error(
@@ -484,13 +496,40 @@ export async function classifyNode(
   );
 
   console.log(
-    `Found ${existingMap.size} already-classified emails in Supabase`
+    `Found ${existingMap.size} already-classified/failed emails in Supabase`
   );
 
-  /* ── 2. Only classify emails without a stored category ── */
+  /* ── 2. Only classify emails with pending status ── */
+  const pendingRows: {
+    message_id: string;
+    classification_status: string;
+  }[] = [];
+
+  for (const chunk of chunkArray(messageIds, IN_CLAUSE_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from("emails")
+      .select("message_id, classification_status")
+      .in("message_id", chunk)
+      .eq("google_account_id", state.googleAccountId)
+      .eq("classification_status", "pending");
+
+    if (error) {
+      throw new Error(
+        `Failed to check pending emails: ${error.message}`
+      );
+    }
+
+    pendingRows.push(...(data ?? []));
+  }
+
+  const pendingIds = new Set(pendingRows.map((r) => r.message_id));
+
+  // Emails to classify = in current batch AND pending
   const emailsToClassify = state.emails.filter(
-    (email) => !existingMap.has(email.id)
+    (email) => pendingIds.has(email.id)
   );
+
+  console.log(`Emails needing classification (pending): ${emailsToClassify.length}`);
 
   // Emails Gmail already files under a low-value tab get a deterministic
   // LOW_PRIORITY classification — no LLM call, no tokens spent.
@@ -512,55 +551,143 @@ export async function classifyNode(
     existingMap.values()
   );
 
-  for (const email of lowValueEmails) {
-    const details = CATEGORY_DETAILS.LOW_PRIORITY;
-    const classification: EmailClassification = {
-      messageId: email.id,
-      category: "LOW_PRIORITY",
-      reason: `Filed under a low-value Gmail category (${(email.labels ?? [])
-        .find((label) => LOW_VALUE_GMAIL_LABELS.has(label))
-        ?.replace("CATEGORY_", "")
-        .toLowerCase()}).`,
-      suggested_action: details.suggested_action,
-    };
+  // Helper to persist classification with status tracking
+  async function persistClassificationWithStatus(
+    emailId: string,
+    result: { category: string; reason: string; suggested_action: string; classifierModel: string; tokensUsed?: number } | { error: string; classifierModel?: string },
+    isSuccess: boolean
+  ): Promise<EmailClassification | null> {
+    if (isSuccess) {
+      const { category, reason, suggested_action, classifierModel } = result as any;
+      const classification: EmailClassification = {
+        messageId: emailId,
+        category,
+        reason,
+        suggested_action,
+      };
 
-    const { data: updatedRows, error: updateError } = await supabase
-      .from("emails")
-      .update({
-        category: classification.category,
-        classification_reason: classification.reason,
-        suggested_action: classification.suggested_action,
-        classified_at: new Date().toISOString(),
-      })
-      .eq("message_id", email.id)
-      .eq("google_account_id", state.googleAccountId)
-      .select("message_id");
+      const { data: updatedRows, error: updateError } = await supabase
+        .from("emails")
+        .update({
+          category: classification.category,
+          classification_reason: classification.reason,
+          suggested_action: classification.suggested_action,
+          classified_at: new Date().toISOString(),
+          classification_status: "classified",
+          classification_error: null,
+          classifier_model: classifierModel,
+        })
+        .eq("message_id", emailId)
+        .eq("google_account_id", state.googleAccountId)
+        .select("message_id");
 
-    if (updateError) {
-      throw new Error(
-        `Failed to persist classification: ${updateError.message}`
-      );
+      if (updateError) {
+        throw new Error(`Failed to persist classification: ${updateError.message}`);
+      }
+
+      if (!updatedRows || updatedRows.length === 0) {
+        throw new Error("Failed to persist classification: no matching email row was updated");
+      }
+
+      return classification;
+    } else {
+      // Permanent failure - mark as failed
+      const { error: updateError } = await supabase
+        .from("emails")
+        .update({
+          classification_status: "failed",
+          classification_error: (result as any).error,
+          classifier_model: (result as any).classifierModel ?? "unknown",
+        })
+        .eq("message_id", emailId)
+        .eq("google_account_id", state.googleAccountId);
+
+      if (updateError) {
+        console.error(`Failed to mark email ${emailId} as failed: ${updateError.message}`);
+      }
+      return null;
     }
-
-    if (!updatedRows || updatedRows.length === 0) {
-      throw new Error(
-        "Failed to persist classification: no matching email row was updated"
-      );
-    }
-
-    classifications.push(classification);
-    console.log(`Classified ${email.id} via Gmail labels: LOW_PRIORITY`);
   }
 
-  const emailsNeedingJev = llmEmails;
+  // Handle low-value emails (deterministic LOW_PRIORITY via Gmail labels)
+  for (const email of lowValueEmails) {
+    const details = CATEGORY_DETAILS.LOW_PRIORITY;
+    const classification = await persistClassificationWithStatus(
+      email.id,
+      {
+        category: "LOW_PRIORITY",
+        reason: `Filed under a low-value Gmail category (${(email.labels ?? [])
+          .find((label) => LOW_VALUE_GMAIL_LABELS.has(label))
+          ?.replace("CATEGORY_", "")
+          .toLowerCase()}).`,
+        suggested_action: details.suggested_action,
+        classifierModel: "rules",
+      },
+      true
+    );
 
-  console.log(`Emails to classify via Jev: ${emailsNeedingJev.length}`);
+    if (classification) {
+      classifications.push(classification);
+      console.log(`Classified ${email.id} via Gmail labels: LOW_PRIORITY`);
+    }
+  }
 
-  // Fail the run loudly on a configuration problem instead of letting every
-  // email fail individually, be skipped, and the run look "complete".
-  if (emailsNeedingJev.length > 0 && !process.env.JEVMODEL_API_KEY) {
+  // Header-based deterministic classification (List-Unsubscribe, Precedence, Auto-Submitted, noreply)
+  const headerLowPriorityEmails: typeof llmEmails = [];
+  const remainingLLMEmails: typeof llmEmails = [];
+
+  for (const email of llmEmails) {
+    const signals = {
+      listUnsubscribe: email.listUnsubscribe ?? "",
+      precedence: email.precedence ?? "",
+      autoSubmitted: email.autoSubmitted ?? "",
+      fromEmail: email.from ?? "",
+    };
+    const headerCategory = classifyByHeaders(signals);
+    if (headerCategory === "LOW_PRIORITY") {
+      headerLowPriorityEmails.push(email);
+    } else {
+      remainingLLMEmails.push(email);
+    }
+  }
+
+  if (headerLowPriorityEmails.length > 0) {
+    console.log(`Classified ${headerLowPriorityEmails.length} emails via header rules: LOW_PRIORITY`);
+  }
+
+  // Persist header-based LOW_PRIORITY classifications
+  for (const email of headerLowPriorityEmails) {
+    const details = CATEGORY_DETAILS.LOW_PRIORITY;
+    const classification = await persistClassificationWithStatus(
+      email.id,
+      {
+        category: "LOW_PRIORITY",
+        reason: "Identified as automated/bulk mail via headers (List-Unsubscribe, Precedence, Auto-Submitted, or noreply sender).",
+        suggested_action: details.suggested_action,
+        classifierModel: "rules",
+      },
+      true
+    );
+
+    if (classification) {
+      classifications.push(classification);
+    }
+  }
+
+  const emailsNeedingLLM = remainingLLMEmails;
+
+  const order = getClassifierOrder();
+  console.log(`Emails to classify via LLM: ${emailsNeedingLLM.length} (classifier order: ${order.join(" > ")})`);
+
+  // Reset circuit breakers at start of run
+  resetCircuitBreakers();
+
+  // Fail early if no LLM classifiers are available
+  const hasGroq = order.includes("groq") && (process.env.GROQ_CLASSIFY_KEY || process.env.GROQ_API_KEY);
+  const hasJev = order.includes("jev") && process.env.JEVMODEL_API_KEY;
+  if (emailsNeedingLLM.length > 0 && !hasGroq && !hasJev) {
     throw new Error(
-      "Missing JEVMODEL_API_KEY environment variable — cannot classify emails"
+      "No LLM classifiers configured (need GROQ_CLASSIFY_KEY/GROQ_API_KEY or JEVMODEL_API_KEY)"
     );
   }
 
@@ -568,8 +695,8 @@ export async function classifyNode(
   let attempted = 0;
   let rateLimited = false;
 
-  for (let i = 0; i < emailsNeedingJev.length; i++) {
-    const email = emailsNeedingJev[i];
+  for (let i = 0; i < emailsNeedingLLM.length; i++) {
+    const email = emailsNeedingLLM[i];
     attempted += 1;
 
     console.log(`Classifying email: ${email.id}`);
@@ -580,88 +707,78 @@ export async function classifyNode(
     console.log(`Classification body length: ${cleanedBody.length}`);
 
     try {
-      const category = await classifyWithJev(email, cleanedBody);
-      const details = CATEGORY_DETAILS[category];
+      const result = await classifyWithFallback(email, cleanedBody);
 
-      // Deterministic metadata: no additional LLM call.
-      const result = LLMEmailClassificationSchema.safeParse({
-        category,
-        reason: details.reason,
-        suggested_action: details.suggested_action,
-      });
+      const classification = await persistClassificationWithStatus(
+        email.id,
+        {
+          category: result.category,
+          reason: CATEGORY_DETAILS[result.category].reason,
+          suggested_action: CATEGORY_DETAILS[result.category].suggested_action,
+          classifierModel: result.classifierModel,
+          tokensUsed: result.tokensUsed,
+        },
+        true
+      );
 
-      if (!result.success) {
-        console.error("Invalid classification:", result.error.flatten());
-        throw new Error(
-          `Invalid classification returned by Jev for email ${email.id}`
-        );
+      if (classification) {
+        classifications.push(classification);
       }
-
-      const classification: EmailClassification = {
-        messageId: email.id,
-        ...result.data,
-      };
-
-      /* ── 3. Persist classification to Supabase ── */
-      // A classification only counts once it is stored. Selecting the
-      // updated row also catches an update that matched nothing.
-      const { data: updatedRows, error: updateError } = await supabase
-        .from("emails")
-        .update({
-          category: classification.category,
-          classification_reason: classification.reason,
-          suggested_action: classification.suggested_action,
-          classified_at: new Date().toISOString(),
-        })
-        .eq("message_id", email.id)
-        .eq("google_account_id", state.googleAccountId)
-        .select("message_id");
-
-      if (updateError) {
-        throw new Error(
-          `Failed to persist classification: ${updateError.message}`
-        );
-      }
-
-      if (!updatedRows || updatedRows.length === 0) {
-        throw new Error(
-          "Failed to persist classification: no matching email row was updated"
-        );
-      }
-
-      console.log(`Persisted classification for ${email.id}`);
-      classifications.push(classification);
 
       console.log(
-        `Classification: ${classification.category} — ${classification.reason}`
+        `Classification: ${result.category} — ${CATEGORY_DETAILS[result.category].reason} (via ${result.classifierModel}${result.tokensUsed ? `, tokens: ${result.tokensUsed}` : ""})`
       );
-      console.log(`Verified messageId: ${classification.messageId}`);
     } catch (error: any) {
       const reason = error?.message ?? String(error);
       failures.push({ messageId: email.id, reason });
       console.error(`Failed to classify email ${email.id}:`, reason);
 
-      if (error?.status === 429) {
+      // Check if it's a quota/auth error - leave as pending for retry
+      const isQuota =
+        error?.status === 429 ||
+        error?.message?.includes?.("429") ||
+        error?.message?.toLowerCase().includes("quota") ||
+        error?.message?.toLowerCase().includes("rate limit") ||
+        error?.message?.toLowerCase().includes("unauthorized") ||
+        error?.message?.toLowerCase().includes("401") ||
+        error?.message?.toLowerCase().includes("403");
+
+      if (isQuota) {
+        // Leave as pending (don't mark failed) so it gets retried next run
+        console.warn(
+          `Quota/auth error for ${email.id} — leaving as pending for retry`
+        );
+      } else {
+        // Permanent error - mark as failed
+        await persistClassificationWithStatus(
+          email.id,
+          { error: reason, classifierModel: "unknown" },
+          false
+        );
+      }
+
+      // Check if it's a rate limit error from Groq - stop batch
+      if (error?.status === 429 || error?.message?.includes?.("429")) {
         console.warn(
           "Rate limit hit — stopping classification batch early. " +
-            `${emailsNeedingJev.length - attempted} emails were not attempted this run.`
+            `${emailsNeedingLLM.length - attempted} emails were not attempted this run.`
         );
         rateLimited = true;
         break;
       }
     }
 
-    if (i < emailsNeedingJev.length - 1) {
+    if (i < emailsNeedingLLM.length - 1) {
       await sleep(DELAY_BETWEEN_REQUESTS_MS);
     }
   }
 
-  const notAttempted = emailsNeedingJev.length - attempted;
+  const notAttempted = emailsNeedingLLM.length - attempted;
   const classifiedNow =
-    emailsNeedingJev.length - failures.length - notAttempted;
+    emailsNeedingLLM.length - failures.length - notAttempted;
 
   console.log(
-    `Classified ${classifiedNow}/${emailsNeedingJev.length} new emails ` +
+    `Classified ${classifiedNow}/${emailsNeedingLLM.length} new emails ` +
       `(${existingMap.size} already classified, ${failures.length} failed, ` +
       `${notAttempted} not attempted${
         rateLimited ? " — batch stopped early due to rate limit" : ""

@@ -138,6 +138,36 @@ describe("listEmails", () => {
     expect(emailChain.in).not.toHaveBeenCalled();
   });
 
+  it("applies ACTIONABLE filter with actionable categories plus unclassified", async () => {
+    const accountChain = createChain({
+      data: { id: "google-account-1" },
+      error: null,
+    });
+
+    const emailChain = createChain({
+      data: [],
+      error: null,
+      count: 0,
+    });
+
+    supabaseMock.from
+      .mockReturnValueOnce(accountChain)
+      .mockReturnValueOnce(emailChain);
+
+    const res = createRes();
+
+    await listEmails(req({ category: "ACTIONABLE" }), res);
+
+    expect(emailChain.or).toHaveBeenCalledWith(
+      "category.in.(IMPORTANT,REQUIRES_REPLY,INFORMATIONAL,MEETING),category.is.null"
+    );
+    expect(emailChain.in).not.toHaveBeenCalled();
+    expect(emailChain.eq).not.toHaveBeenCalledWith(
+      "category",
+      expect.anything()
+    );
+  });
+
   it("defaults to page 1, limit 20", async () => {
     const accountChain = createChain({
       data: { id: "google-account-1" },

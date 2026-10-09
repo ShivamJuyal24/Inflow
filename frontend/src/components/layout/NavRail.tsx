@@ -11,9 +11,11 @@ import {
   ArrowDownCircle,
   ShieldAlert,
   AlertCircle,
+  Filter,
 } from "lucide-react"
 
 export type NavCategory =
+  | "ACTIONABLE"
   | "ALL"
   | "NEEDS_ATTENTION"
   | "IMPORTANT"
@@ -21,16 +23,17 @@ export type NavCategory =
   | "MEETING"
   | "INFORMATIONAL"
   | "LOW_PRIORITY"
-  | "SPAM"
+  | "SPAM";
 
 interface NavRailProps {
-  active: NavCategory
-  onChange: (category: NavCategory) => void
+  active: NavCategory;
+  onChange: (category: NavCategory) => void;
 }
 
 // 🎨 Icon color mapping – export so other components can use it
 export const ICON_COLORS: Record<NavCategory, string> = {
-  ALL: "text-primary",
+  ACTIONABLE: "text-primary",
+  ALL: "text-slate-400",
   NEEDS_ATTENTION: "text-orange-500",
   IMPORTANT: "text-red-500",
   REQUIRES_REPLY: "text-amber-500",
@@ -38,11 +41,12 @@ export const ICON_COLORS: Record<NavCategory, string> = {
   INFORMATIONAL: "text-blue-500",
   LOW_PRIORITY: "text-slate-400",
   SPAM: "text-rose-400",
-}
+};
 
 // 📛 Optional: category labels for reuse
 export const CATEGORY_LABELS: Record<NavCategory, string> = {
-  ALL: "Inbox",
+  ACTIONABLE: "Inbox",
+  ALL: "Everything",
   NEEDS_ATTENTION: "Needs attention",
   IMPORTANT: "Important",
   REQUIRES_REPLY: "Reply needed",
@@ -50,11 +54,12 @@ export const CATEGORY_LABELS: Record<NavCategory, string> = {
   INFORMATIONAL: "Informational",
   LOW_PRIORITY: "Low priority",
   SPAM: "Spam",
-}
+};
 
 const NAV_ITEMS = [
-  { key: "ALL", label: "Inbox", icon: Inbox },
-] as const
+  { key: "ACTIONABLE" as NavCategory, label: "Inbox", icon: Inbox },
+  { key: "ALL" as NavCategory, label: "Everything", icon: Filter },
+] as const;
 
 const CATEGORY_ITEMS: { key: NavCategory; label: string; icon: React.ElementType }[] = [
   { key: "NEEDS_ATTENTION", label: "Needs attention", icon: AlertCircle },
@@ -64,20 +69,20 @@ const CATEGORY_ITEMS: { key: NavCategory; label: string; icon: React.ElementType
   { key: "INFORMATIONAL", label: "Informational", icon: Info },
   { key: "LOW_PRIORITY", label: "Low priority", icon: ArrowDownCircle },
   { key: "SPAM", label: "Spam", icon: ShieldAlert },
-]
+];
 
 function NavButton({
   item,
   active,
   onChange,
 }: {
-  item: { key: NavCategory; label: string; icon: React.ElementType }
-  active: NavCategory
-  onChange: (c: NavCategory) => void
+  item: { key: NavCategory; label: string; icon: React.ElementType };
+  active: NavCategory;
+  onChange: (c: NavCategory) => void;
 }) {
-  const Icon = item.icon
-  const isActive = active === item.key
-  const iconColor = ICON_COLORS[item.key]
+  const Icon = item.icon;
+  const isActive = active === item.key;
+  const iconColor = ICON_COLORS[item.key];
 
   return (
     <Button
@@ -91,17 +96,17 @@ function NavButton({
       <Icon className={`h-4 w-4 shrink-0 ${iconColor}`} />
       <span className="truncate">{item.label}</span>
     </Button>
-  )
+  );
 }
 
 export default function NavRail({ active, onChange }: NavRailProps) {
-  const { signOut } = useAuth()
-  const navigate = useNavigate()
+  const { signOut } = useAuth();
+  const navigate = useNavigate();
 
   const handleSignOut = async () => {
-    await signOut()
-    navigate("/login")
-  }
+    await signOut();
+    navigate("/login");
+  };
 
   return (
     <nav className="flex h-full w-56 shrink-0 flex-col gap-1 border-r border-border bg-background p-3">
@@ -110,7 +115,6 @@ export default function NavRail({ active, onChange }: NavRailProps) {
       {NAV_ITEMS.map((item) => (
         <NavButton
           key={item.key}
-          // TypeScript correctly infers `item` as having key "ALL" (a subtype of NavCategory)
           item={item}
           active={active}
           onChange={onChange}
@@ -136,5 +140,5 @@ export default function NavRail({ active, onChange }: NavRailProps) {
         Sign out
       </Button>
     </nav>
-  )
+  );
 }

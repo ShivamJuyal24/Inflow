@@ -22,7 +22,7 @@ Inflow is a full-stack Gmail triage application. It connects to your Gmail inbox
 | Database/Auth | Supabase (Postgres + Auth) |
 | Orchestration | LangGraph |
 | Email/OAuth | Gmail API, Google OAuth 2.0 |
-| Classification | Jev (`jev-latest`) |
+| Classification | Groq (`openai/gpt-oss-20b`, reasoning effort: low) + Jev fallback |
 | Drafting | Groq (`openai/gpt-oss-120b`) |
 | Validation | Zod 4 |
 | Tests | Vitest |
@@ -228,6 +228,61 @@ For a 100-email triage run with 10 drafts:
 - TypeScript build: passes
 - All 182 backend tests: pass
 - No changes to business logic, API contracts, or database schemas
+
+## New Features (v2)
+
+### Automatic Follow-up Drafts
+Sent replies that receive no response within 3 days automatically generate a polite follow-up draft. The original draft is capped at one follow-up, and any thread that gets a reply is never followed up. Drafts appear in the UI with a purple "Follow-up" badge and go through the same approve/send gate.
+
+- **Scheduler**: Hourly sweep (`FOLLOWUP_INTERVAL_MS`, default 1h), checks `sent_at` + 3 days (`FOLLOW_UP_DELAY_MS`)
+- **Reply detection**: Any inbound message in the same `thread_id` after `sent_at` cancels the follow-up
+- **DB columns**: `drafts.sent_at`, `followed_up_at`, `follow_up_count`, `kind` (`reply` | `follow_up`)
+- **Unique index**: `(email_id, kind)` allows one reply draft + one follow-up draft per email
+
+### Smarter Default Inbox View
+The dashboard now defaults to an **"Inbox"** view showing only actionable categories: `IMPORTANT`, `REQUIRES_REPLY`, `INFORMATIONAL`, `MEETING`, plus unclassified. `LOW_PRIORITY` and `SPAM` are hidden by default but one click away via the left rail ("Everything", "Low priority", "Spam"). Unclassified emails are never hidden.
+
+### Groq Primary Classifier with Jev Fallback
+- **Primary**: Groq `openai/gpt-oss-20b` (reasoning model, effort: low, max 400 completion tokens, JSON output)
+- **Fallback**: Jev (`jev-latest`) — optional, skipped if no key or quota error
+- **Order**: Configurable via `CLASSIFIER_ORDER` (default `groq,jev`)
+- **Circuit breaker**: In-memory per-run breaker opens on quota/auth errors to avoid hammering a failing provider
+- **Records**: `emails.classifier_model` stores which classifier produced the result (`groq` | `jev` | `rules`)
+
+### Classification Status & Retry
+Emails now have a `classification_status` column:
+| Status | Meaning |
+|---|---|
+| `pending` | Not yet classified, will be picked up next run |
+| `classified` | Success — category stored |
+| `failed` | Permanent error — `classification_error` has details |
+
+Quota/rate-limit errors leave the email `pending` for automatic retry. Permanent errors (malformed output after retry) mark `failed`. Index on `pending` makes the next-run scan fast.
+
+### Deterministic Header-Based Classification (Zero LLM)
+Before any LLM call, emails are checked for automated/bulk signals:
+- `List-Unsubscribe` header present
+- `Precedence: bulk/list/junk`
+- `Auto-Submitted: auto-generated/auto-replied/auto-notified`
+- `noreply@` / `no-reply@` / `donotreply@` sender
+
+These are instantly classified `LOW_PRIORITY` with `classifier_model = 'rules'` — no tokens spent. Combined with existing Gmail label shortcuts, a large fraction of inbox mail never hits an LLM.
+
+### Cleaner Body for Classification
+The body sent to the LLM is now trimmed to ~500 chars (was 1200) after:
+- Stripping quoted reply chains (`> ` lines, "On DATE wrote:" blocks)
+- Removing signature separators (`--`, `__`) and common sign-offs
+- Removing URLs
+- Collapsing whitespace
+
+This cuts classification token usage by ~60% while preserving the signal (subject, ask, context usually appear early).
+
+### Classifier Comparison Script
+```bash
+# Run Groq classifier against 30 labeled emails
+npx tsx scripts/compareClassifiers.ts scripts/labeled-emails.json
+```
+Prints accuracy, mismatches, per-category breakdown, and token stats.
 
 ## Roadmap / known gaps
 

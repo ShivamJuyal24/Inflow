@@ -168,21 +168,149 @@ function findBodyByMimeType(
 }
 
 /**
+ * Deterministic classification signals extracted from headers.
+ */
+export interface ClassificationSignals {
+  listUnsubscribe: string;
+  precedence: string;
+  autoSubmitted: string;
+  fromEmail: string;
+}
+
+/**
+ * Extracts headers that are strong signals for automated/bulk mail.
+ */
+export function extractClassificationSignals(
+  headers: gmail_v1.Schema$MessagePartHeader[] | undefined
+): ClassificationSignals {
+  return {
+    listUnsubscribe: getHeader(headers, "List-Unsubscribe"),
+    precedence: getHeader(headers, "Precedence"),
+    autoSubmitted: getHeader(headers, "Auto-Submitted"),
+    fromEmail: getHeader(headers, "From"),
+  };
+}
+
+/**
+ * Determines if an email should be classified as LOW_PRIORITY based on
+ * header signals alone (no LLM needed).
+ */
+export function classifyByHeaders(signals: ClassificationSignals): "LOW_PRIORITY" | null {
+  const { listUnsubscribe, precedence, autoSubmitted, fromEmail } = signals;
+
+  // List-Unsubscribe header is a strong indicator of mailing list / marketing
+  if (listUnsubscribe && listUnsubscribe.trim().length > 0) {
+    return "LOW_PRIORITY";
+  }
+
+  // Precedence: bulk/list/junk are RFC indicators of bulk mail
+  const precedenceLower = precedence.toLowerCase();
+  if (precedenceLower === "bulk" || precedenceLower === "list" || precedenceLower === "junk") {
+    return "LOW_PRIORITY";
+  }
+
+  // Auto-Submitted header (RFC 3834) indicates automated responses
+  const autoLower = autoSubmitted.toLowerCase();
+  if (autoLower === "auto-generated" || autoLower === "auto-replied" || autoLower === "auto-notified") {
+    return "LOW_PRIORITY";
+  }
+
+  // noreply / no-reply / donotreply senders
+  const fromLower = fromEmail.toLowerCase();
+  if (
+    fromLower.includes("noreply@") ||
+    fromLower.includes("no-reply@") ||
+    fromLower.includes("donotreply@") ||
+    fromLower.startsWith("noreply") ||
+    fromLower.startsWith("no-reply")
+  ) {
+    return "LOW_PRIORITY";
+  }
+
+  return null;
+}
+
+/**
+ * Strips quoted reply chains (lines starting with > or "On ... wrote:")
+ * and common signature patterns from email body.
+ */
+export function stripQuotedAndSignatures(body: string): string {
+  if (!body) return "";
+
+  let cleaned = body;
+
+  // Remove quoted reply blocks (lines starting with >)
+  cleaned = cleaned.replace(/^>.*$/gm, "");
+
+  // Remove "On DATE, NAME wrote:" blocks
+  cleaned = cleaned.replace(/^On .+ wrote:[\s\S]*?(?=\n\n|$)/gim, "");
+
+  // Remove common signature separators (--, __)
+  cleaned = cleaned.replace(/^--\s*$[\s\S]*$/gm, "");
+  cleaned = cleaned.replace(/^__\s*$[\s\S]*$/gm, "");
+
+  // Remove lines that look like signatures (name + title + contact)
+  // This is heuristic: short lines at the end with typical patterns
+  const lines = cleaned.split("\n");
+  const filteredLines: string[] = [];
+  let signatureStarted = false;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!signatureStarted) {
+      // Check if this line looks like a signature start
+      const isSignatureLike =
+        /^(thanks|thank you|regards|best|sincerely|cheers),?$/i.test(line) ||
+        /^sent from my (iPhone|iPad|Android|mobile)/i.test(line) ||
+        /^get outlook for/i.test(line);
+      if (isSignatureLike) {
+        signatureStarted = true;
+        continue;
+      }
+    }
+    if (!signatureStarted) {
+      filteredLines.unshift(lines[i]);
+    }
+  }
+
+  cleaned = filteredLines.join("\n");
+
+  // Collapse whitespace
+  cleaned = cleaned
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n\s*\n+/g, "\n\n")
+    .trim();
+
+  return cleaned;
+}
+
+/**
  * Produces a trimmed-down version of the body suitable for sending to
- * an LLM: strips tracking/CTA URLs (which are pure noise for
- * classification and eat into the token budget) and caps length so a
- * single legal-boilerplate-heavy email can't dominate the context
- * window. Kept separate from the raw parsed body so we still store the
- * full text (useful for display/debugging) while only the cleaned
- * version goes to Groq/Gemini.
+ * an LLM: plain text only, strip quoted replies/signatures, strip URLs,
+ * cap at ~500 characters for classification.
  */
 export function cleanBodyForClassification(body: string): string {
-  return body
-    .replace(/https?:\/\/\S+/g, "")
+  if (!body) return "";
+
+  // Strip quoted replies and signatures first
+  let cleaned = stripQuotedAndSignatures(body);
+
+  // Strip URLs
+  cleaned = cleaned.replace(/https?:\/\/\S+/g, "");
+
+  // Collapse whitespace
+  cleaned = cleaned
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n+/g, "\n")
-    .trim()
-    .slice(0, MAX_LLM_BODY_LENGTH);
+    .trim();
+
+  // Cap at ~500 chars for classification (smaller than draft generation)
+  const MAX_CLASSIFICATION_BODY = 500;
+  if (cleaned.length > MAX_CLASSIFICATION_BODY) {
+    cleaned = cleaned.slice(0, MAX_CLASSIFICATION_BODY) + "…";
+  }
+
+  return cleaned;
 }
 
 /**
@@ -192,7 +320,7 @@ export function cleanBodyForClassification(body: string): string {
  * `new Date(...).toISOString()` throws on an Invalid Date, which would
  * otherwise crash the whole fetch batch over one bad email.
  */
-function parseReceivedAt(headers: gmail_v1.Schema$MessagePartHeader[] | undefined): string {
+export function parseReceivedAt(headers: gmail_v1.Schema$MessagePartHeader[] | undefined): string {
   const dateHeader = getHeader(headers, "Date");
   // Strip trailing parenthetical timezone names, e.g. "(UTC)" or "(PST)",
   // which some clients append and which JS's Date parser chokes on.
@@ -216,6 +344,7 @@ function parseReceivedAt(headers: gmail_v1.Schema$MessagePartHeader[] | undefine
  */
 export function parseGmailMessage(message: gmail_v1.Schema$Message): Email {
   const headers = message.payload?.headers;
+  const signals = extractClassificationSignals(headers);
 
   return {
     id: message.id ?? "",
@@ -226,5 +355,8 @@ export function parseGmailMessage(message: gmail_v1.Schema$Message): Email {
     body: message.payload ? extractBody(message.payload) : "",
     receivedAt: parseReceivedAt(headers),
     labels: message.labelIds ?? [],
+    listUnsubscribe: signals.listUnsubscribe,
+    precedence: signals.precedence,
+    autoSubmitted: signals.autoSubmitted,
   };
 }

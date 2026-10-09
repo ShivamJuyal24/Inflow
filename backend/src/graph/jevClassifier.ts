@@ -209,3 +209,23 @@ export async function classifyWithJev(
 
   return category as JevCategory;
 }
+
+/**
+ * Check if an error is a quota/auth error that should trigger circuit breaker.
+ */
+export function isQuotaError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes("quota") ||
+      msg.includes("rate limit") ||
+      msg.includes("429") ||
+      msg.includes("insufficient") ||
+      msg.includes("exceeded") ||
+      msg.includes("unauthorized") ||
+      msg.includes("401") ||
+      msg.includes("403")
+    );
+  }
+  return false;
+}

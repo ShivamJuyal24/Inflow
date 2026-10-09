@@ -24,6 +24,11 @@ export function mapClassificationToAction(
     case "MEETING":
       type = "ANALYZE_MEETING";
       break;
+
+    default:
+      // Failed/unclassified emails get STORE to avoid null action_type
+      type = "STORE";
+      break;
   }
 
   return {
