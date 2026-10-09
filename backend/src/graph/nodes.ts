@@ -326,20 +326,37 @@ export async function fetchNode(
 
   const emails: Email[] = [];
 
-  for (const messageId of idsNeedingFetch) {
-    let fullMessage;
+  const GMAIL_FETCH_CONCURRENCY = 5;
 
-    try {
-      fullMessage = await getMessage(data.refresh_token, messageId);
-    } catch (err: any) {
-      console.error(
-        `Failed to fetch message ${messageId} — will retry on next run:`,
-        err?.message ?? err
-      );
-      continue;
-    }
+  for (
+    let batchStart = 0;
+    batchStart < idsNeedingFetch.length;
+    batchStart += GMAIL_FETCH_CONCURRENCY
+  ) {
+    const batch = idsNeedingFetch.slice(
+      batchStart,
+      batchStart + GMAIL_FETCH_CONCURRENCY
+    );
 
-    emails.push(parseGmailMessage(fullMessage));
+    const batchEmails = await Promise.all(
+      batch.map(async (messageId) => {
+        try {
+          const fullMessage = await getMessage(
+            data.refresh_token,
+            messageId
+          );
+          return parseGmailMessage(fullMessage);
+        } catch (err: any) {
+          console.error(
+            `Failed to fetch message ${messageId} — will retry on next run:`,
+            err?.message ?? err
+          );
+          return null;
+        }
+      })
+    );
+
+    emails.push(...batchEmails.filter((email): email is Email => email !== null));
   }
 
   console.log(`Parsed ${emails.length} emails`);
@@ -1003,6 +1020,7 @@ Draft the reply:
         await groq.chat.completions.create({
           model: "openai/gpt-oss-120b",
           temperature: 0.3,
+          max_tokens: 300,
           messages: [
             {
               role: "system",
